@@ -17,7 +17,7 @@
 # on there: it applies no updates and reboots nothing, so `allow`, `auto_apply`, `reboot`, `window` and
 # `[services] restartable` are reported to the control plane and enforced by nothing. That is not an
 # oversight — see docs/SECURITY.md section 12.3 for why a Windows host executes only the read tier. The
-# keys that do apply there are `scan`, `[services] watched` and `[limits]`. `[resources] report` is read
+# keys that do apply there are `scan`, `[services] watched`, `[network] report` and `[limits]`. `[resources] report` is read
 # on Windows and reported to the control plane, but a Windows host has nothing to put under it: every
 # reader behind that key is /proc-based. It is in this file on every host for the same reason `scan` is —
 # a key that appeared only in Linux policy files would be one an operator meets during an incident.
@@ -159,6 +159,37 @@ watched = []
 # updates off until the agent is upgraded or the key is removed. Upgrade the agent first, then set the
 # key, and run `hostseal-agent policy check` before restarting anything.
 report = false
+
+[network]
+
+# Whether this host reports its own network interfaces.
+#
+# Interface names, MTUs, up/down state, IP addresses in CIDR form, and MAC addresses. The agent reads
+# them through the kernel's netlink interface as the unprivileged hostseal user; it configures nothing
+# and changes nothing.
+#
+# THE SHIPPED DEFAULT IS true, and unlike the two keys above that is not really a choice. This section
+# has been in every release; the key is new. A default of false would not be caution, it would be a
+# silent removal of a fact your fleet already receives, on the day you upgrade the agent — which is the
+# one thing a new policy key must not do.
+#
+# The key exists because MAC addresses do. An address list describes a network's internal structure, and
+# a MAC address is a durable hardware identifier that outlives a reinstallation and is the join key to a
+# DHCP lease, a switch port and a hypervisor's inventory. None of it tells a HostSeal control plane
+# anything it does not already hold — it authenticates this host by certificate and knows its hostname —
+# but that control plane may not be yours, and "no marginal disclosure to HostSeal" is not the same as
+# "no disclosure". If your network layout is the sensitive part, this is the key.
+#
+# What you lose by writing false: the section is absent rather than empty, so the control plane can tell
+# "this host does not report that" from "this host has no interfaces". The host stays identified by its
+# certificate and its hostname, which is what identifies it everywhere else in HostSeal anyway, and
+# nothing about what may be done to it changes.
+#
+# ORDERING WARNING, as for the keys above: HostSeal refuses a policy file containing a key it does not
+# know, and a refused policy file means the host falls closed. Upgrade the agent first, then set the key,
+# and run `hostseal-agent policy check` before restarting anything. Leaving it out entirely is safe on
+# every version: an absent key means true.
+report = true
 
 [resources]
 

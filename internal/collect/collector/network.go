@@ -6,6 +6,7 @@ import (
 	"sort"
 
 	"github.com/pascalgross/hostseal/internal/collect"
+	"github.com/pascalgross/hostseal/internal/policy"
 )
 
 // maxAddresses caps the addresses reported for one interface.
@@ -39,10 +40,38 @@ type networkInterface struct {
 	AddressesTruncated bool `json:"addressesTruncated,omitempty"`
 }
 
+// networkCollector reports the host's own network interfaces, and lets the host decline to.
+//
+// It is a struct rather than a CollectorFunc for the reason containersCollector is one: it has something
+// to say about the policy, and PolicyGated is a method rather than a closure field. It was a
+// CollectorFunc until hardware addresses were added — the section had no gate at all, which was an
+// omission rather than a decision, and an awkward one to defend once docs/SECURITY.md had to name it as
+// the one disclosure a host could not refuse.
+type networkCollector struct{}
+
 // init registers the network collector.
 func init() {
-	Register(collect.NewCollectorFunc("network", collectNetwork))
+	Register(networkCollector{})
 }
+
+// Name is the key this collector's output appears under in the facts document.
+func (networkCollector) Name() string { return "network" }
+
+// Collect reports the host's interfaces, or the error that stopped it.
+//
+// Unlike the containers and resources collectors, this one does return an error: net.Interfaces failing
+// is not a fact about the host that a report could state, it is the whole section being unavailable, and
+// Gather drops the section and logs the reason. The empty-list case is different and is a note, because
+// a host with no non-loopback interface is a fact worth stating.
+func (networkCollector) Collect(ctx context.Context) (any, error) { return collectNetwork(ctx) }
+
+// PermittedBy reports whether the host's local policy allows its network configuration to be reported.
+//
+// True unless an administrator writes `[network] report = false`, which is argued out on
+// policy.Network.Report: the section predates its key, so the default preserves what every existing host
+// already sends, and the key exists because a MAC address is a durable hardware identifier that a host
+// may not want in somebody else's database.
+func (networkCollector) PermittedBy(p policy.Policy) bool { return p.Network.Report }
 
 // collectNetwork reports the host's network interfaces, their addresses and their hardware addresses.
 //
@@ -59,7 +88,8 @@ func init() {
 // fleet existed. That is a join nothing else here can make, and it is the join an operator needs at the
 // moment they are trying to work out which physical box a hostname corresponds to. The old sentence's
 // real objection — that it is the sort of thing that ends up in a support ticket — is a reason to keep
-// the whole section small and to keep it out of the wallboard, both of which still hold.
+// the whole section small, to keep it out of the wallboard, and to give the host a way to refuse it, all
+// three of which this collector now does.
 func collectNetwork(context.Context) (any, error) {
 	interfaces, err := net.Interfaces()
 	if err != nil {

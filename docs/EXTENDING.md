@@ -94,7 +94,11 @@ object. HostSeal ships three.
 
 `network` reports interfaces, their MTUs, their IP addresses and their MAC addresses. It is also what
 justifies `AF_NETLINK` in the systemd unit's `RestrictAddressFamilies`: `net.Interfaces` uses a netlink
-socket on Linux and returns nothing without it, silently.
+socket on Linux and returns nothing without it, silently. It is worth reading for the mistake it used to
+be: it shipped without a `PolicyGated` half, which was an omission rather than a decision and became
+indefensible the moment it gained hardware addresses — the rule below is not "gate the revealing ones",
+it is "gate the ones a host might reasonably decline", and a section nobody can refuse is one no document
+can honestly describe.
 
 `resources` reports capacity and how much of it is gone — filesystems, memory, processor count and load,
 per-interface traffic — from `/proc` and `statfs(2)`. It is the one to read before adding a collector
@@ -131,6 +135,12 @@ same argument `[updates] scan` makes. What a default-on gate does owe the reader
 without that, adding a default-on key would silence every host in every existing fleet on the day its
 agent was upgraded. `Closed()` is the exception in the other direction and takes the less-disclosing
 value whatever the default is, because a host whose policy file does not parse has said nothing.
+
+`[network] report` ships on for a third reason, which is the one to reach for when adding a gate to a
+section that already exists: it predates its own key. A default of false there would not be caution, it
+would silently take a fact away from every fleet on the day its agents were upgraded — so a gate added
+after the fact defaults to what the section already did, and the argument about disclosure decides
+whether the key exists rather than which way it points.
 
 The policy is asked of, not read by, the collector. A collector that called `policy.Load` itself would
 be reading that file a second time on its own schedule, with no guarantee of agreeing with the policy

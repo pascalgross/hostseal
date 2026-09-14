@@ -850,14 +850,20 @@ of asking about a bind-mounted socket; the difference is that here the layout *i
 "which host is about to run out of disk" has no answer that does not name the filesystem. **MAC
 addresses**, added to the `network` collector in the same change, which identify a machine to a DHCP
 server, a switch and a hypervisor — everything outside HostSeal, which already knows the host by its
-certificate. Those live in `extra.network`, which is **not** policy-gated, so the key below does not
-refuse them; that section has reported IP addresses since the first release and the MAC joins them on the
-same footing. And **capacity and load**, which is a coarse shape of what the machine is for.
+certificate. Those live in `extra.network`, which has a key of its own — `[network] report` — because a
+section that ships a durable hardware identifier and had no way to be refused was an omission rather than
+a decision, and this document had no honest way to write it down. And **capacity and load**, which is a coarse shape of what the machine is for.
+
+Both are refusable, and both keys ship on for the same reason with opposite histories: `[resources]`
+answers the question a fleet agent was installed for, and `[network]` reports something every release so
+far has reported, so turning it off by default would take a fact away from every existing fleet rather
+than protect it.
 
 None of it widens what may be *done* to a host: no intent, no helper, no socket, no privilege. What it
 widens is what a compromised control plane learns, which is the axis [§9](#9-what-hostseal-does-not-defend-against)
-names rather than the one §1 does. The policy key is the answer for a host where that trade is the wrong
-way round, and it is a host-side switch precisely because the control plane must not be able to flip it.
+names rather than the one §1 does. The policy keys are the answer for a host where that trade is the wrong
+way round, and they are host-side switches precisely because the control plane must not be able to flip
+one.
 
 ---
 
@@ -1126,15 +1132,14 @@ An honest guarantee needs an honest boundary. HostSeal does not protect you from
   section assumes is hostile, so a compromised one learns a fleet's network topology — MAC addresses,
   IP addresses, interface names — its filesystem layout and its capacity, along with everything else a
   host sends. That is a disclosure boundary rather than a control boundary: none of it lets anybody *do*
-  anything to a host, and §1 is untouched. What bounds most of it is the host's own `policy.toml`, which
-  is why a section a host might reasonably decline has a key that declines it
-  ([§8.2](#82-what-the-host-decides)). **Interface configuration is the exception and has no key.**
-  Names, IP addresses and MAC addresses are reported by every host, as IP addresses always have been:
-  they are what identifies the machine to its own network, they are visible to anything on that network
-  already, and a fleet tool that could not say which address a host answers on would be a fleet tool
-  nobody could use during an incident. `[resources] report = false` refuses capacity, filesystem layout
-  and traffic volumes; it does not refuse the addresses. A fleet for which even that is too much should
-  run its own control plane — the binary is the same one.
+  anything to a host, and §1 is untouched. What bounds it is the host's own `policy.toml`, which is why
+  every section a host might reasonably decline has a key that declines it
+  ([§8.2](#82-what-the-host-decides)): `[resources] report = false` refuses capacity, filesystem layout
+  and traffic volumes, and `[network] report = false` refuses interface names, addresses and hardware
+  addresses. Both ship **on**, because both sections either predate their key or answer the question a
+  fleet agent was installed for, and a key whose default removed a fact an existing fleet already
+  receives would be a worse failure than the disclosure. A host that turns both off is still identified
+  by its certificate and its hostname, which is what identifies it everywhere else in this system.
 - **A host enrolled *during* a control-plane compromise being given somebody else's identity.** The
   signed job payload binds a job to a `hostId`, and a host learns its `hostId` from the enrolment
   response — so a control plane that was already compromised when a host enrolled can hand that host an

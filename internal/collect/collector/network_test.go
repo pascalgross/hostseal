@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/pascalgross/hostseal/internal/collect"
+	"github.com/pascalgross/hostseal/internal/policy"
 )
 
 // noAddresses is the address lookup for a test that is not about addresses.
@@ -28,6 +29,63 @@ func (addr) Network() string { return "ip+net" }
 
 // String renders the address, which is the only thing the collector reports.
 func (a addr) String() string { return string(a) }
+
+// network returns the registered network collector.
+//
+// Looked up through All rather than constructed, for the reason the containers and resources helpers
+// are: the assertion worth making is about the collector that runs on a host.
+func network(t *testing.T) collect.Collector {
+	t.Helper()
+	for _, c := range All() {
+		if c.Name() == "network" {
+			return c
+		}
+	}
+	t.Fatal("no collector is registered as \"network\"")
+	return nil
+}
+
+// TestTheNetworkSectionCanBeRefused covers the gate this collector did not have.
+//
+// It had none at all until hardware addresses were added, which was an omission rather than a decision:
+// docs/EXTENDING.md's rule is that a section a host might reasonably decline gets a way to decline it,
+// and a durable hardware identifier in a control plane somebody else operates is such a section. The
+// default points the other way from the containers gate, and both directions are pinned here because
+// both are deliberate.
+func TestTheNetworkSectionCanBeRefused(t *testing.T) {
+	gated, ok := network(t).(collect.PolicyGated)
+	if !ok {
+		t.Fatal("the network collector is not policy-gated, so no host can decline to report its " +
+			"addresses and hardware addresses")
+	}
+
+	if !gated.PermittedBy(policy.Default()) {
+		t.Error("the built-in default stopped reporting network configuration; this section predates " +
+			"its key, so the default must preserve what every existing host already sends")
+	}
+	if gated.PermittedBy(policy.Closed()) {
+		t.Error("a host whose policy could not be read reports its network configuration; a policy " +
+			"that failed to load must disclose less, not more, whatever the default says")
+	}
+
+	opted, err := policy.Parse([]byte("[network]\nreport = false\n"))
+	if err != nil {
+		t.Fatalf("parsing a policy that opts out: %v", err)
+	}
+	if gated.PermittedBy(opted) {
+		t.Error("a host that wrote report = false reports its network configuration anyway")
+	}
+
+	// The case that matters most for a default-on key: a policy file written before it existed must
+	// keep the shipped value rather than fall to a zero one.
+	silent, err := policy.Parse([]byte("[updates]\nallow = \"security\"\n"))
+	if err != nil {
+		t.Fatalf("parsing a policy that predates the key: %v", err)
+	}
+	if !gated.PermittedBy(silent) {
+		t.Error("a policy file that does not mention the key switches network reporting off")
+	}
+}
 
 // TestHardwareAddressesAreReported covers the decision this collector reversed.
 //

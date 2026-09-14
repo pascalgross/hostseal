@@ -322,7 +322,18 @@ collection or an agent predating this field; a client that needs to tell those a
 version in the same heartbeat.
 
 `extra` holds the output of registered collectors, keyed by collector name. It is where a fact added
-through the `collect.Collector` seam appears; see [`EXTENDING.md`](EXTENDING.md).
+through the `collect.Collector` seam appears; see [`EXTENDING.md`](EXTENDING.md). Every section in it is
+refusable by the host's own policy and is **absent** rather than empty when refused, so a client reading
+the policy in the same heartbeat can always say "this host does not report that" rather than "this host
+has none".
+
+`extra.network` is present unless a host has written `policy.network.report = false`. It ships on, and
+the default is the one place in this document where "on" is not an argument about disclosure: the section
+has been in every release, so a default of false would remove a fact from every existing fleet on the day
+its agents were upgraded. The key exists because `hardwareAddress` does — a MAC address is a durable
+identifier that outlives a reinstallation and is the join key to a DHCP lease, a switch port and a
+hypervisor's inventory, which is precisely what makes it useful and what a host may decline to put in a
+control plane it does not own.
 
 `extra.containers` is present only on a host whose `policy.containers.report` is `true`, and the policy
 in the same heartbeat is what lets a client say "this host does not report containers" rather than

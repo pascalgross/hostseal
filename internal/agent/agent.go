@@ -364,6 +364,12 @@ func policyView(p policy.Policy) map[string]any {
 		"resources": map[string]any{
 			"report": p.Resources.Report,
 		},
+		// And this one, whose absence a client cannot infer from anything else: a host that has switched
+		// network reporting off looks exactly like one whose netlink access was taken away, and the two
+		// want different responses.
+		"network": map[string]any{
+			"report": p.Network.Report,
+		},
 		"limits": map[string]any{
 			"maxJobAgeSeconds": p.Limits.MaxJobAgeSeconds,
 		},

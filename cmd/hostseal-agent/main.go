@@ -366,6 +366,7 @@ func policyCommand(argv []string) int {
 	// docs/INSTALL.md both name this command as the way to check an edit to it — and a check whose
 	// output is byte-identical before and after the edit is a check that confirms nothing.
 	fmt.Printf("resources.report    %t\n", p.Resources.Report)
+	fmt.Printf("network.report      %t\n", p.Network.Report)
 	fmt.Printf("updates.scan        %t\n", p.Updates.Scan)
 	fmt.Printf("limits.max_job_age_seconds %d\n", p.Limits.MaxJobAgeSeconds)
 	fmt.Printf("paused              %t\n", policy.Paused())

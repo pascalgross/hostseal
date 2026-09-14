@@ -480,6 +480,7 @@ Straight after installation, before you change anything:
 | Reports which of its units are in the failed state | **yes**, for every unit. `[services] watched` narrows which *changes* become events, not what is reported |
 | Reports the containers running on it | **no**, until `[containers] report = true` |
 | Reports its disk, memory, processor load and interface traffic | **yes**, until `[resources] report = false` |
+| Reports its interfaces, IP addresses and MAC addresses | **yes**, until `[network] report = false` |
 
 The two files are the whole of it:
 
@@ -490,7 +491,7 @@ edit with `hostseal-agent policy check` before restarting anything: a file that 
 host refuse all privileged work rather than fall back to a default, which is deliberate and is a
 miserable way to discover a typo.
 
-Three keys in it are the exception to everything the paragraph above says, because they bound what this
+Four keys in it are the exception to everything the paragraph above says, because they bound what this
 host *says* rather than what may be done to it. None is a permission, and none involves a signature.
 
 `[services] watched` decides which unit-state changes become events, and its empty default means
@@ -532,6 +533,16 @@ replace `/home`, `/root`, `/tmp` and `/var/tmp` with empty filesystems inside th
 namespace, so a separate `/home` partition is not in the report. The report names those paths rather than
 leaving you to notice a missing disk. The same **upgrade the agent before you add the key** warning applies — though
 leaving the key out entirely is safe on every version, because an absent key means `true`.
+
+`[network] report` is the fourth, and it also ships **on** — but for a different reason, which is worth
+knowing before you reason about the others. That section has been in every release; the key is new. A
+default of `false` would not have been caution, it would have silently removed a fact your fleet already
+receives on the day you upgraded. The key exists because MAC addresses do: an address list describes your
+network's internal structure, and a MAC address is a durable hardware identifier that outlives a
+reinstallation and joins a host to a DHCP lease, a switch port and a hypervisor's inventory. None of it
+tells the control plane anything it does not already hold — but that control plane may not be yours.
+Write `false` if the network layout is the sensitive part; the host stays identified by its certificate
+and its hostname.
 
 **`/etc/hostseal/trusted-signers`** — root-owned, a dpkg conffile, and **empty**. Every destructive
 operation needs a signature from a key listed here, and the control plane holds none of them. Generate

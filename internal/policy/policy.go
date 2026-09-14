@@ -201,6 +201,33 @@ type Containers struct {
 	Report bool `toml:"report"`
 }
 
+// Network is the [network] section of the policy file.
+type Network struct {
+	// Report is whether this host reports its network interfaces, addresses and hardware addresses.
+	//
+	// It ships **true**, and the two halves of that — that a gate exists at all, and which way it
+	// points — are separate decisions that were once run together, to this section's cost.
+	//
+	// A gate exists because docs/EXTENDING.md's rule applies: a section a host might reasonably decline
+	// gets a way to decline it. A MAC address is a durable hardware identifier that outlives a
+	// reinstallation and is the join key to a DHCP server, a switch port and a hypervisor's inventory;
+	// an address list describes a network's internal structure. Neither tells a HostSeal control plane
+	// anything it does not already hold — it authenticates the host by certificate and knows its
+	// hostname — but "no marginal disclosure to HostSeal" is not "no disclosure": that control plane may
+	// be somebody else's, and its operator's data processing agreement now has to enumerate this. A host
+	// whose network layout is the sensitive part gets to say no, and before this key it could not.
+	//
+	// It points on because the section predates the key. Interface addresses have been reported since
+	// the first release, so a default of false would not be a conservative choice — it would be a silent
+	// behaviour change that took a fact away from every fleet on the day its agents were upgraded, which
+	// is the one thing a new policy key must not do. Turning it off leaves a host identified by its
+	// certificate and its hostname, which is what identifies it everywhere else in this system anyway.
+	//
+	// It bounds what this host *says*, never what may be done to it, so turning it off is not a
+	// permission change and no signature is involved.
+	Report bool `toml:"report"`
+}
+
 // Resources is the [resources] section of the policy file.
 type Resources struct {
 	// Report is whether this host reports its capacity and how much of it is in use.
@@ -249,6 +276,9 @@ type Policy struct {
 	// Containers bounds what this host says about the containers running on it.
 	Containers Containers `toml:"containers"`
 
+	// Network bounds what this host says about its own network interfaces.
+	Network Network `toml:"network"`
+
 	// Resources bounds what this host says about its capacity and how much of it is in use.
 	Resources Resources `toml:"resources"`
 
@@ -290,8 +320,12 @@ func Default() Policy {
 		// zero value — so a policy file written before this key existed keeps reporting capacity
 		// instead of going quiet on every host in an existing fleet the day the agent is upgraded.
 		Resources: Resources{Report: true},
-		Limits:    Limits{MaxJobAgeSeconds: 900},
-		source:    "built-in default",
+		// True as well, and for a different reason from the line above: this section shipped before its
+		// key did, so true is what keeps adding the key from being a change to what every existing host
+		// reports.
+		Network: Network{Report: true},
+		Limits:  Limits{MaxJobAgeSeconds: 900},
+		source:  "built-in default",
 	}
 	// Validated rather than hand-assembled, so the derived window matches the string beside it. A
 	// zero-valued Window reports itself closed at every instant while Updates.Window says "always",
@@ -319,8 +353,12 @@ func Closed() Policy {
 		// up and for the same reason: a host whose policy file does not parse has said nothing about
 		// what it discloses, and the closed policy declines on its behalf rather than on its default.
 		Resources: Resources{Report: false},
-		Limits:    Limits{MaxJobAgeSeconds: 900},
-		source:    "closed (policy could not be loaded)",
+		// False, like every other reporting gate here and unlike its own default: a host whose policy
+		// file does not parse has said nothing about what it discloses, and the closed policy answers on
+		// its behalf rather than on its default.
+		Network: Network{Report: false},
+		Limits:  Limits{MaxJobAgeSeconds: 900},
+		source:  "closed (policy could not be loaded)",
 	}
 	if err := p.validate(); err != nil {
 		panic("policy: the closed policy does not validate: " + err.Error())
