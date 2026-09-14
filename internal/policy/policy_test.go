@@ -148,6 +148,40 @@ func TestContainerReportingIsOffUntilTheHostSaysOtherwise(t *testing.T) {
 	}
 }
 
+// TestResourceReportingIsOnUntilTheHostSaysOtherwise covers the gate that ships the other way round.
+//
+// It is the opposite default from the containers gate above, and both are deliberate, so both are
+// pinned rather than left to a one-word diff. A count of missing patches and a disk at ninety-eight per
+// cent are the numbers somebody installed a fleet agent to see; what a business runs on that host is
+// not. Asserted on all four ways a policy can come into existence, because the case that matters most
+// is the fourth: a policy file written before this key existed must keep reporting rather than fall to a
+// zero value, or every host in an existing fleet goes quiet on the day its agent is upgraded.
+func TestResourceReportingIsOnUntilTheHostSaysOtherwise(t *testing.T) {
+	if !Default().Resources.Report {
+		t.Error("the built-in default does not report capacity")
+	}
+	if Closed().Resources.Report {
+		t.Error("the closed policy reports capacity; a host that cannot read its policy must disclose " +
+			"less, not more, whatever the default says")
+	}
+
+	p, err := Parse([]byte("[updates]\nallow = \"security\"\n"))
+	if err != nil {
+		t.Fatalf("parsing a policy with no [resources] section: %v", err)
+	}
+	if !p.Resources.Report {
+		t.Error("a policy file that predates the key stops reporting capacity")
+	}
+
+	p, err = Parse([]byte("[resources]\nreport = false\n"))
+	if err != nil {
+		t.Fatalf("parsing a policy that opts out: %v", err)
+	}
+	if p.Resources.Report {
+		t.Error("a host that wrote report = false is reporting its capacity anyway")
+	}
+}
+
 // TestLoadFromMissingFileReturnsTheBuiltInDefault covers the unconfigured host.
 //
 // A missing file and an unparseable file mean opposite things and must not be conflated: the first is

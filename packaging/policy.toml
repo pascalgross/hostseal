@@ -17,7 +17,10 @@
 # on there: it applies no updates and reboots nothing, so `allow`, `auto_apply`, `reboot`, `window` and
 # `[services] restartable` are reported to the control plane and enforced by nothing. That is not an
 # oversight — see docs/SECURITY.md section 12.3 for why a Windows host executes only the read tier. The
-# keys that do apply there are `scan`, `[services] watched` and `[limits]`.
+# keys that do apply there are `scan`, `[services] watched` and `[limits]`. `[resources] report` is read
+# on Windows and reported to the control plane, but a Windows host has nothing to put under it: every
+# reader behind that key is /proc-based. It is in this file on every host for the same reason `scan` is —
+# a key that appeared only in Linux policy files would be one an operator meets during an incident.
 
 [updates]
 
@@ -156,6 +159,46 @@ watched = []
 # updates off until the agent is upgraded or the key is removed. Upgrade the agent first, then set the
 # key, and run `hostseal-agent policy check` before restarting anything.
 report = false
+
+[resources]
+
+# Whether this host reports its capacity and how much of it is in use.
+#
+# The agent reads /proc and asks the kernel how full each mounted filesystem is, as the unprivileged
+# hostseal user. No socket, no helper, no new privilege — the same reading any account on this machine
+# could do. What you get is the pair of questions a fleet tool is asked at three in the morning and could
+# not previously answer: which machine is about to run out of disk, and which one is not keeping up.
+#
+# It reports: each real filesystem with its size, how full it is and how many inodes are gone; total
+# memory and swap and how much of each is spoken for; the processor count and the one-minute load average
+# as a percentage of it; and per-interface traffic, errors and drops since boot. Interface names, MTUs,
+# IP and MAC addresses are in the network section, which is separate and is not gated.
+#
+# THE SHIPPED DEFAULT IS true, which is the opposite of [containers] report below. The difference is the
+# same one `scan` draws: a container name describes what a business runs and is a disclosure a host has
+# not agreed to make, while a disk at ninety-eight per cent is the fleet health somebody installed this
+# agent to see. What this key buys you is the last word on the hosts where it is nobody else's business.
+#
+# Two things it is worth knowing before turning it off. Mount points are host filesystem layout, and if
+# that is what you object to, this is the key. And every figure in the section is banded — load and memory
+# to five percentage points, disks to one, traffic to whole gibibytes — so that a host whose state has not
+# changed produces an identical report and keeps sending a digest instead of a full one. A busy host still
+# crosses a band often enough to send full reports, so on a metered link this key is also the bill. The
+# per-interface error and drop counters are the one exception to the banding and are reported exactly,
+# because the whole value of those numbers is whether they are moving — which does mean an interface
+# dropping the odd unwanted multicast frame is enough to keep a host sending full reports.
+#
+# What it cannot see is what the agent's own sandbox hides from it. ProtectHome= and PrivateTmp= in the
+# agent's systemd unit replace /home, /root, /tmp and /var/tmp with empty filesystems inside the agent's
+# mount namespace, so a separate /home partition is not in this report. The report names those paths in
+# words rather than leaving you to notice a missing disk.
+#
+# ORDERING WARNING, as for the two keys above: HostSeal refuses a policy file containing a key it does not
+# know, and a refused policy file means the host falls closed. Writing this key on a host whose
+# hostseal-agent predates it switches that host's updates off until the agent is upgraded or the key is
+# removed. Upgrade the agent first, then set the key, and run `hostseal-agent policy check` before
+# restarting anything. Leaving it out entirely is safe on every version: an absent key means true.
+report = true
 
 [limits]
 

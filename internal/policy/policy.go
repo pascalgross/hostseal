@@ -201,6 +201,28 @@ type Containers struct {
 	Report bool `toml:"report"`
 }
 
+// Resources is the [resources] section of the policy file.
+type Resources struct {
+	// Report is whether this host reports its capacity and how much of it is in use.
+	//
+	// It ships **true**, which is the opposite of [containers] report, and the difference is the same
+	// one [updates] scan draws. A container name describes what a business runs and is a disclosure a
+	// host has not agreed to make; a disk that is about to fill up is the kind of fleet health an
+	// operator who installed a fleet agent has asked about. What this key buys them is a way to say no
+	// on the hosts where the answer is nobody else's business.
+	//
+	// It is gated at all for two reasons that outlive the default. The first is docs/EXTENDING.md's
+	// rule, which is that a section a host might reasonably decline gets a way to decline it — and mount
+	// points are host filesystem layout, which internal/collect/containers.go refuses to disclose as a
+	// side effect of asking a different question. The second is bandwidth: every figure in the section is
+	// banded so that an unchanged host produces an unchanged digest, but a host that is genuinely busy
+	// crosses a band often, and an operator on a metered link gets to stop paying for that.
+	//
+	// It bounds what this host *says*, never what may be done to it, so turning it off is not a
+	// permission change and no signature is involved.
+	Report bool `toml:"report"`
+}
+
 // Limits is the [limits] section of the policy file.
 type Limits struct {
 	// MaxJobAgeSeconds is how long after issue a job may still be executed.
@@ -226,6 +248,9 @@ type Policy struct {
 
 	// Containers bounds what this host says about the containers running on it.
 	Containers Containers `toml:"containers"`
+
+	// Resources bounds what this host says about its capacity and how much of it is in use.
+	Resources Resources `toml:"resources"`
 
 	// Limits bounds job age.
 	Limits Limits `toml:"limits"`
@@ -260,8 +285,13 @@ func Default() Policy {
 		// Written out rather than left to the zero value, because a default that matters is one a
 		// reader should be able to find by looking at the defaults.
 		Containers: Containers{Report: false},
-		Limits:     Limits{MaxJobAgeSeconds: 900},
-		source:     "built-in default",
+		// True, and written out beside the false above so that the two sit where a reader compares
+		// them. It also survives an absent key, because Parse decodes over Default rather than into a
+		// zero value — so a policy file written before this key existed keeps reporting capacity
+		// instead of going quiet on every host in an existing fleet the day the agent is upgraded.
+		Resources: Resources{Report: true},
+		Limits:    Limits{MaxJobAgeSeconds: 900},
+		source:    "built-in default",
 	}
 	// Validated rather than hand-assembled, so the derived window matches the string beside it. A
 	// zero-valued Window reports itself closed at every instant while Updates.Window says "always",
@@ -285,8 +315,12 @@ func Closed() Policy {
 		// conversation — so the closed policy declines it along with everything else.
 		Updates:    Updates{Allow: AllowNone, AutoApply: false, Scan: false, Timezone: "UTC", Reboot: RebootNever},
 		Containers: Containers{Report: false},
-		Limits:     Limits{MaxJobAgeSeconds: 900},
-		source:     "closed (policy could not be loaded)",
+		// False here although it is true in Default, which is the same asymmetry Scan carries one line
+		// up and for the same reason: a host whose policy file does not parse has said nothing about
+		// what it discloses, and the closed policy declines on its behalf rather than on its default.
+		Resources: Resources{Report: false},
+		Limits:    Limits{MaxJobAgeSeconds: 900},
+		source:    "closed (policy could not be loaded)",
 	}
 	if err := p.validate(); err != nil {
 		panic("policy: the closed policy does not validate: " + err.Error())

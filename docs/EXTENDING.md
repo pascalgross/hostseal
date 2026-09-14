@@ -90,10 +90,21 @@ is a different and much longer conversation.
 
 Add a file under `internal/collect/collector` with a `Register` call in its `init`, and nothing else in
 the codebase learns about it. Output appears under the collector's name in the facts document's `extra`
-object. HostSeal ships two.
+object. HostSeal ships three.
 
-`network` is also what justifies `AF_NETLINK` in the systemd unit's `RestrictAddressFamilies`:
-`net.Interfaces` uses a netlink socket on Linux and returns nothing without it, silently.
+`network` reports interfaces, their MTUs, their IP addresses and their MAC addresses. It is also what
+justifies `AF_NETLINK` in the systemd unit's `RestrictAddressFamilies`: `net.Interfaces` uses a netlink
+socket on Linux and returns nothing without it, silently.
+
+`resources` reports capacity and how much of it is gone — filesystems, memory, processor count and load,
+per-interface traffic — from `/proc` and `statfs(2)`. It is the one to read before adding a collector
+whose numbers move, because the interesting problem there is not the reading. Every volatile figure it
+reports is **banded**, coarsely enough that a host whose state has not changed produces byte-identical
+bytes and keeps sending a digest rather than a full report. A section that ignores this does not fail;
+it works perfectly and quietly turns [`PROTOCOL.md` §4.1](PROTOCOL.md#41-digest-first) off for every host
+that carries it, which that section calls a production incident rather than an inefficiency. Pick the
+band from the granularity at which the number is worth acting on, name it in a constant with the reason,
+and round **down** so the reported figure is never higher than the truth.
 
 `containers` reports Docker container state from `/proc` and the cgroup tree, and it is the one that
 shows what the optional half of this seam is for:
@@ -110,6 +121,16 @@ before collecting. Most facts are not: a unit list and a package count say nothi
 Container state is, which is why `[containers] report` ships `false`. A refused section is **absent**
 rather than empty, and the host's policy travels in the same heartbeat, so a client can say "this host
 does not report containers" rather than "this host has none".
+
+A gate does not have to ship off, and `[resources] report` ships **on**. The two questions are separate:
+whether a host should be able to decline a section, and what it should do when nobody has said. Capacity
+gets a gate because mount points are filesystem layout and some fleets will not want to send it; it
+defaults on because a disk about to fill up is what a fleet agent was installed to answer, which is the
+same argument `[updates] scan` makes. What a default-on gate does owe the reader is the fourth case:
+`Parse` decodes over `Default`, so a policy file written before the key existed keeps the shipped value —
+without that, adding a default-on key would silence every host in every existing fleet on the day its
+agent was upgraded. `Closed()` is the exception in the other direction and takes the less-disclosing
+value whatever the default is, because a host whose policy file does not parse has said nothing.
 
 The policy is asked of, not read by, the collector. A collector that called `policy.Load` itself would
 be reading that file a second time on its own schedule, with no guarantee of agreeing with the policy

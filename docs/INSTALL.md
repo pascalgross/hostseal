@@ -479,6 +479,7 @@ Straight after installation, before you change anything:
 | Restarts a service, or reboots | **no**, from anyone, until you change the two files below |
 | Reports which of its units are in the failed state | **yes**, for every unit. `[services] watched` narrows which *changes* become events, not what is reported |
 | Reports the containers running on it | **no**, until `[containers] report = true` |
+| Reports its disk, memory, processor load and interface traffic | **yes**, until `[resources] report = false` |
 
 The two files are the whole of it:
 
@@ -489,9 +490,8 @@ edit with `hostseal-agent policy check` before restarting anything: a file that 
 host refuse all privileged work rather than fall back to a default, which is deliberate and is a
 miserable way to discover a typo.
 
-Two keys in it are the exception to everything the paragraph above says, because they bound what this
-host *says* rather than what may be done to it. Neither is a permission, and neither involves a
-signature.
+Three keys in it are the exception to everything the paragraph above says, because they bound what this
+host *says* rather than what may be done to it. None is a permission, and none involves a signature.
 
 `[services] watched` decides which unit-state changes become events, and its empty default means
 *every* unit rather than none: permitting an action and reporting a fact are different questions, and a
@@ -512,6 +512,26 @@ full report on every heartbeat rather than the digest it would otherwise send. A
 before you add the key**: the policy parser refuses a file it does not understand and falls closed, so
 writing `[containers]` into a host still running an older agent turns that host's update permission off
 until the agent catches up.
+
+`[resources] report` is the third, and it is the one that ships **on**. A host reports how full each of
+its filesystems is, how much memory and swap are spoken for, its processor count and load, and what each
+interface has moved since boot — the two questions a fleet tool is asked at three in the morning. It ships
+on for the same reason the update count does: it is what somebody installed a fleet agent to see. Write
+`false` if the mount points and device names are nobody else's business, which is the one genuinely new
+disclosure in it.
+
+It costs much less bandwidth than the containers section, and deliberately. Every utilisation figure is
+banded — load and memory to five percentage points, disks to one, traffic to whole gibibytes — so a host
+whose state has not changed keeps sending a digest instead of a full report. The per-interface error and
+drop counters are the one exception and are exact, because the value of those numbers is entirely in
+whether they are moving; an interface that drops the odd unwanted multicast frame is therefore enough to
+keep a host sending full reports, which is the reason this key is worth knowing about on a metered link.
+
+It cannot see what the agent's own sandbox hides. `ProtectHome=` and `PrivateTmp=` in the agent's unit
+replace `/home`, `/root`, `/tmp` and `/var/tmp` with empty filesystems inside the agent's mount
+namespace, so a separate `/home` partition is not in the report. The report names those paths rather than
+leaving you to notice a missing disk. The same **upgrade the agent before you add the key** warning applies — though
+leaving the key out entirely is safe on every version, because an absent key means `true`.
 
 **`/etc/hostseal/trusted-signers`** — root-owned, a dpkg conffile, and **empty**. Every destructive
 operation needs a signature from a key listed here, and the control plane holds none of them. Generate

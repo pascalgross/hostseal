@@ -140,7 +140,7 @@ nothing an unprivileged local user could not read.
 
 | Intent | What it does |
 | --- | --- |
-| `facts.collect` | Inventory: OS, kernel, hardware, network, uptime |
+| `facts.collect` | Inventory: OS, kernel, hardware, network, uptime, capacity and load |
 | `packages.listUpgradable` | Simulated upgrade parse; splits security from regular |
 | `services.list` | systemd unit state over the D-Bus read interface |
 | `reboot.checkRequired` | Reboot-required markers and `needrestart` output |
@@ -834,6 +834,31 @@ does not: whether a container is privileged, whether its seccomp filter was disa
 as root, and **whether the Docker socket is bind-mounted into it** — which is the risk this very
 paragraph is about, found on a host rather than assumed.
 
+The `resources` collector is the second read-only path and reaches no further: `/proc` for the processor
+count, the load average, memory and per-interface counters, and `statfs(2)` for each mounted filesystem.
+No socket, no helper, no group, no new intent, and nothing in this section changes for it either. It is
+**on** until `[resources] report = false` is written into the host's own `policy.toml`, which is the
+opposite default from containers and is argued out in [`PROTOCOL.md` §4.2](PROTOCOL.md#42-full-report):
+what a business runs on a host is a disclosure that host has not agreed to make, while a disk about to
+fill up is what somebody installed a fleet agent to see.
+
+What it discloses is worth naming here rather than leaving to be inferred, because [§1](#1-the-guarantee)
+assumes the control plane is hostile and therefore assumes an attacker reads everything a host reports.
+Three things are new to that attacker. **Filesystem layout** — mount points, device names and sizes —
+which is the same inventory the `containers` collector deliberately refuses to disclose as a side effect
+of asking about a bind-mounted socket; the difference is that here the layout *is* the question, since
+"which host is about to run out of disk" has no answer that does not name the filesystem. **MAC
+addresses**, added to the `network` collector in the same change, which identify a machine to a DHCP
+server, a switch and a hypervisor — everything outside HostSeal, which already knows the host by its
+certificate. Those live in `extra.network`, which is **not** policy-gated, so the key below does not
+refuse them; that section has reported IP addresses since the first release and the MAC joins them on the
+same footing. And **capacity and load**, which is a coarse shape of what the machine is for.
+
+None of it widens what may be *done* to a host: no intent, no helper, no socket, no privilege. What it
+widens is what a compromised control plane learns, which is the axis [§9](#9-what-hostseal-does-not-defend-against)
+names rather than the one §1 does. The policy key is the answer for a host where that trade is the wrong
+way round, and it is a host-side switch precisely because the control plane must not be able to flip it.
+
 ---
 
 ## 7. Provisioning and the enrolment-time exception
@@ -1097,6 +1122,19 @@ An honest guarantee needs an honest boundary. HostSeal does not protect you from
   `unattended-upgrades` does not need us. A control-plane outage must never mean an unpatched fleet.
 - **Traffic analysis.** The existence, timing and size of heartbeats are visible to anyone on the
   path, even though the contents are not.
+- **What a host chooses to report.** Everything in the facts document reaches a control plane this
+  section assumes is hostile, so a compromised one learns a fleet's network topology — MAC addresses,
+  IP addresses, interface names — its filesystem layout and its capacity, along with everything else a
+  host sends. That is a disclosure boundary rather than a control boundary: none of it lets anybody *do*
+  anything to a host, and §1 is untouched. What bounds most of it is the host's own `policy.toml`, which
+  is why a section a host might reasonably decline has a key that declines it
+  ([§8.2](#82-what-the-host-decides)). **Interface configuration is the exception and has no key.**
+  Names, IP addresses and MAC addresses are reported by every host, as IP addresses always have been:
+  they are what identifies the machine to its own network, they are visible to anything on that network
+  already, and a fleet tool that could not say which address a host answers on would be a fleet tool
+  nobody could use during an incident. `[resources] report = false` refuses capacity, filesystem layout
+  and traffic volumes; it does not refuse the addresses. A fleet for which even that is too much should
+  run its own control plane — the binary is the same one.
 - **A host enrolled *during* a control-plane compromise being given somebody else's identity.** The
   signed job payload binds a job to a `hostId`, and a host learns its `hostId` from the enrolment
   response — so a control plane that was already compromised when a host enrolled can hand that host an

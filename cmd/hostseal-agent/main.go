@@ -360,7 +360,13 @@ func policyCommand(argv []string) int {
 	fmt.Printf("updates.window      %s (%s)\n", p.Window(), p.Updates.Timezone)
 	fmt.Printf("updates.reboot      %s\n", p.Updates.Reboot)
 	fmt.Printf("services.restartable %v\n", p.Services.Restartable)
+	fmt.Printf("services.watched    %v\n", p.Services.Watched)
 	fmt.Printf("containers.report   %t\n", p.Containers.Report)
+	// Printed even though this key bounds only what the host says, because packaging/policy.toml and
+	// docs/INSTALL.md both name this command as the way to check an edit to it — and a check whose
+	// output is byte-identical before and after the edit is a check that confirms nothing.
+	fmt.Printf("resources.report    %t\n", p.Resources.Report)
+	fmt.Printf("updates.scan        %t\n", p.Updates.Scan)
 	fmt.Printf("limits.max_job_age_seconds %d\n", p.Limits.MaxJobAgeSeconds)
 	fmt.Printf("paused              %t\n", policy.Paused())
 	if !p.Window().Always() {
