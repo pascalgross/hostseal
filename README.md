@@ -95,7 +95,12 @@ workflow that no maintainer can override:
 
 ## What it does
 
-- **Inventory** — OS, kernel, hardware, network, uptime, Ubuntu Pro / ESM status where applicable.
+- **Inventory** — OS, kernel, hardware, network interfaces with their MAC and IP addresses, uptime,
+  Ubuntu Pro / ESM status where applicable.
+- **Capacity and load** — disk space and how full each filesystem is, memory and swap, processor
+  count and load, per-interface traffic. Read from `/proc` as an unprivileged user, with every
+  volatile figure deliberately banded so a host that has not changed keeps sending a digest rather
+  than a full report. A host can switch it off; it ships on.
 - **systemd service state** — read over D-Bus, not by parsing `systemctl` output. On Windows, service
   state from the SCM, read with enumerate rights rather than as an administrator.
 - **Package update visibility** — security updates separated from the rest, correctly on both Ubuntu
@@ -122,7 +127,9 @@ workflow that no maintainer can override:
 ## What it will never do
 
 No remote shell. No configuration management — this is not Ansible. No metrics platform — Prometheus
-does time series properly; this takes a low-frequency state snapshot. No secret distribution — the
+does time series properly; this takes a low-frequency state snapshot. That sentence survives the
+capacity figures above rather than in spite of them: one banded value per heartbeat, nothing retained
+between them, no rates computed and no history kept. It tells you which host to point Prometheus at. No secret distribution — the
 control plane never pushes credentials to hosts. No VPN requirement. No runtime plugin loader. No
 database abstraction layer for portability.
 

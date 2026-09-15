@@ -1,0 +1,9 @@
+25 30 0:24 / /proc rw,nosuid,nodev,noexec,relatime shared:5 - proc proc rw
+26 30 0:25 / /sys rw,nosuid,nodev,noexec,relatime shared:6 - sysfs sysfs rw
+27 26 0:26 / /sys/fs/cgroup rw,nosuid,nodev,noexec,relatime shared:7 - cgroup2 cgroup2 rw
+30 1 252:1 / / rw,relatime shared:1 - ext4 /dev/vda1 rw,errors=remount-ro
+31 30 0:29 / /run rw,nosuid,nodev shared:9 - tmpfs tmpfs rw,size=816788k,mode=755
+32 30 252:2 / /var rw,relatime shared:12 - xfs /dev/vda2 rw,attr2,inode64
+33 30 252:1 /srv/backup /mnt/backup rw,relatime shared:14 - ext4 /dev/vda1 rw
+34 30 7:0 / /snap/core22/1122 ro,nodev,relatime shared:16 - squashfs /dev/loop0 ro
+35 30 252:3 / /mnt/readonly ro,relatime shared:18 - ext4 /dev/vdb1 ro

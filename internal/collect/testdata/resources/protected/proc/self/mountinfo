@@ -1,0 +1,8 @@
+25 30 0:24 / /proc rw,nosuid,nodev,noexec,relatime shared:5 - proc proc rw
+26 30 0:25 / /sys ro,nosuid,nodev,noexec,relatime shared:6 - sysfs sysfs rw
+30 1 252:1 / / ro,relatime shared:1 - ext4 /dev/vda1 rw,errors=remount-ro
+32 30 252:2 / /var ro,relatime shared:12 - xfs /dev/vda2 rw,attr2,inode64
+36 30 252:1 /var/lib/hostseal /var/lib/hostseal rw,relatime shared:1 - ext4 /dev/vda1 rw
+40 30 0:41 / /home ro,nosuid,nodev,noexec - ramfs ramfs ro,mode=755
+42 30 0:43 / /tmp rw,nosuid,nodev - tmpfs tmpfs rw,size=1024k
+35 30 252:3 / /mnt/readonly ro,relatime shared:18 - ext4 /dev/vdb1 ro

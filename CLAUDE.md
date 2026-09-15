@@ -149,9 +149,15 @@ Agent → server only, over HTTPS with mTLS, five endpoints. There is no path fr
   helpers reach none of them, because one of them dlopens a library an operator names.
 - `internal/collect` — facts, with a `Platform` seam for the four distribution differences that
   otherwise produce silent wrong answers (security origins, the reboot marker, Ubuntu Pro, `apt-check`).
-  Two collectors ship: `network`, and `containers`, which reads `/proc` and the cgroup tree — no socket,
-  no group, no helper — and is the one implementer of the optional `PolicyGated` half of the seam, so a
-  host that has not written `[containers] report = true` sends no such section at all.
+  Three collectors ship — `network`, `containers` and `resources` — and **all three** implement the
+  optional `PolicyGated` half of the seam, so every section a host sends is one it can refuse. They do
+  not point the same way, and each direction is argued on its own key: `[containers] report` ships
+  `false`, so a host that has not opted in sends no such section at all; `[resources] report` ships
+  `true` because a disk about to fill up is what a fleet agent was installed to answer; `[network]
+  report` ships `true` because that section predates its key, and a gate added after the fact defaults
+  to what the section already did rather than taking a fact away from every existing fleet. Every
+  volatile figure in `resources` is banded so that an unchanged host keeps sending a digest rather than
+  a full report; that is the constraint, not the reading.
 - `internal/store` — PostgreSQL, plus an in-memory implementation for tests only.
 - `web/` — Angular 22 standalone, built into where `hostseal-server` embeds it.
 - `deploy/` — the control plane in containers: the `Dockerfile` at the repository root builds

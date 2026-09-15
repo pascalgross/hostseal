@@ -554,9 +554,76 @@ type mountEntry struct {
 
 	// superOptions are the per-superblock options, the last field on the line.
 	superOptions string
+
+	// deviceID is the "major:minor" of the device behind the mount.
+	//
+	// It is what tells two mounts of the same disk apart from two disks, which the mount point cannot
+	// do and the source string cannot either — a filesystem mounted by UUID and the same one mounted by
+	// path carry different sources and the same device.
+	deviceID string
+
+	// source is the mount source, such as "/dev/vda1", as the first field after the separator gives it.
+	source string
+
+	// mountOptions are the per-mount options, the sixth field of the line.
+	//
+	// They are separate from superOptions because the two can disagree, and the disagreement is the
+	// useful case: a filesystem mounted read-write at the superblock can be mounted read-only here.
+	mountOptions string
 }
 
-// parseMountinfoLine splits one mountinfo line into the three fields this package needs.
+// readOnly reports whether the filesystem itself is mounted read-only.
+//
+// **The superblock options only, and never the per-mount options.** That distinction is the whole of
+// this function and it was got wrong once. `ProtectSystem=strict` in the agent's own systemd unit is a
+// read-only bind remount of the entire hierarchy, and a read-only bind remount sets `ro` in the
+// per-mount field while leaving the superblock reading `rw`:
+//
+//	73 48 254:0 /usr /usr ro,relatime - ext4 /dev/vda rw,resv_strict
+//
+// So a check that consulted the per-mount options would find every filesystem on the host read-only,
+// report none of them, and do it silently on every host in the fleet — a plausible answer arrived at by
+// not looking, which is the failure this package exists to refuse. The superblock field is what
+// distinguishes a disk that genuinely cannot be written — a squashfs image, a `mount -o ro` data disk —
+// from one this process merely cannot write.
+func (m mountEntry) readOnly() bool {
+	for _, option := range strings.Split(m.superOptions, ",") {
+		if option == "ro" {
+			return true
+		}
+	}
+	return false
+}
+
+// unescapeMountPath decodes the octal escapes mountinfo uses for awkward characters in a path.
+//
+// The kernel escapes space, tab, newline and backslash as a backslash and three octal digits, and
+// decodes nothing else — so this decodes nothing else either. A decoder that accepted any escape would
+// turn a path containing a literal backslash followed by digits into a different path, which is a worse
+// answer than leaving it alone.
+func unescapeMountPath(raw string) string {
+	if !strings.Contains(raw, `\`) {
+		return raw
+	}
+	var out strings.Builder
+	for i := 0; i < len(raw); {
+		if raw[i] == '\\' && i+3 < len(raw) {
+			if value, err := strconv.ParseUint(raw[i+1:i+4], 8, 8); err == nil {
+				switch byte(value) {
+				case ' ', '\t', '\n', '\\':
+					out.WriteByte(byte(value))
+					i += 4
+					continue
+				}
+			}
+		}
+		out.WriteByte(raw[i])
+		i++
+	}
+	return out.String()
+}
+
+// parseMountinfoLine splits one mountinfo line into the fields this package needs.
 //
 // The format has a variable number of optional fields before a " - " separator, so the fields after it
 // cannot be reached by index from the start of the line. Splitting on the separator first is what makes
@@ -568,13 +635,21 @@ func parseMountinfoLine(line string) (mountEntry, bool) {
 	}
 	head := strings.Fields(before)
 	tail := strings.Fields(after)
-	if len(head) < 5 || len(tail) < 3 {
+	if len(head) < 6 || len(tail) < 3 {
 		return mountEntry{}, false
 	}
-	// Mountinfo escapes space, tab, newline and backslash in paths as octal. Only the basename of the
-	// mount point is compared anywhere in this file, and unescaping would not change the answer for a
-	// path called docker.sock, so the raw field is used and the limitation is stated rather than hidden.
-	return mountEntry{point: head[4], fsType: tail[0], superOptions: tail[2]}, true
+	// Mountinfo escapes space, tab, newline and backslash in paths as octal. The mount point is now
+	// reported for display as well as compared, so it is unescaped here rather than at one of the two
+	// call sites: a filesystem mounted at "/mnt/my backup" would otherwise be reported as
+	// "/mnt/my\040backup", which is a path an operator cannot paste into anything.
+	return mountEntry{
+		point:        unescapeMountPath(head[4]),
+		fsType:       tail[0],
+		superOptions: tail[2],
+		deviceID:     head[2],
+		source:       tail[1],
+		mountOptions: head[5],
+	}, true
 }
 
 // hasDockerSocketMount reports whether a process has something named docker.sock mounted into it.

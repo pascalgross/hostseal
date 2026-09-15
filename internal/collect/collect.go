@@ -48,6 +48,25 @@ const (
 	// host running more than two hundred containers is one whose fleet-level answer is "look at the
 	// orchestrator", not "read two thousand rows in a heartbeat".
 	MaxContainers = 200
+
+	// MaxFilesystems caps the mounted filesystems listed in one report.
+	//
+	// Low, because the list is already filtered down to filesystems that can actually fill up, and a
+	// host with more than fifty of those is a storage server whose answer is its own tooling rather than
+	// a fleet dashboard. The bound is here rather than at the transport for the reason the others are:
+	// the mount table on a container host is unbounded — every image layer and every bind mount is a
+	// line — so the host has to be the thing that stops counting.
+	MaxFilesystems = 50
+
+	// MaxInterfaces caps the network interfaces listed in one report.
+	//
+	// It bounds both the configuration this agent reports and the traffic counters beside it, and it is
+	// the bound that was missing: a Docker host has one veth pair per container, so a machine running
+	// two hundred containers has upwards of two hundred interfaces, each carrying up to ten addresses.
+	// That is an unbounded list in a document with a one-mebibyte ceiling, which docs/PROTOCOL.md §4.5
+	// exists to refuse. Fifty is far above any physical machine and far below the number a container
+	// host produces, which is the line worth drawing.
+	MaxInterfaces = 50
 )
 
 // Family is the distribution family a platform implementation handles.
