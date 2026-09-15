@@ -17,6 +17,12 @@ import (
 // something else should take the ordinary one.
 func noAddresses(net.Interface) ([]net.Addr, error) { return nil, nil }
 
+// noDevices is the device lookup for a test that is not about which interfaces are real.
+//
+// False for everything, so the rank collapses to the address test and then to the name — which is the
+// ordering every test written before the cap learned to prefer physical cards was asserting.
+func noDevices(string) bool { return false }
+
 // addr is a net.Addr built from a string, for handing fixed addresses to describeInterfaces.
 //
 // net.Addr is an interface and every concrete implementation in the standard library parses something,
@@ -101,7 +107,7 @@ func TestHardwareAddressesAreReported(t *testing.T) {
 	out, truncated := describeInterfaces([]net.Interface{
 		{Name: "eth0", MTU: 1500, Flags: net.FlagUp, HardwareAddr: mac},
 		{Name: "tun0", MTU: 1400, Flags: net.FlagUp | net.FlagPointToPoint},
-	}, noAddresses)
+	}, noAddresses, noDevices)
 
 	if truncated {
 		t.Error("a two-interface host reports its list as truncated")
@@ -129,7 +135,7 @@ func TestTheLoopbackInterfaceIsNotReported(t *testing.T) {
 	out, _ := describeInterfaces([]net.Interface{
 		{Name: "lo", MTU: 65536, Flags: net.FlagUp | net.FlagLoopback},
 		{Name: "eth0", MTU: 1500, Flags: net.FlagUp},
-	}, noAddresses)
+	}, noAddresses, noDevices)
 
 	if len(out) != 1 || out[0].Name != "eth0" {
 		t.Errorf("reported %+v, want eth0 alone", out)
@@ -147,7 +153,7 @@ func TestAddressesAreSortedThenCut(t *testing.T) {
 		many = append(many, addr(fmt.Sprintf("10.0.%03d.1/24", i)))
 	}
 	out, _ := describeInterfaces([]net.Interface{{Name: "eth0", MTU: 1500, Flags: net.FlagUp}},
-		func(net.Interface) ([]net.Addr, error) { return many, nil })
+		func(net.Interface) ([]net.Addr, error) { return many, nil }, noDevices)
 
 	if len(out) != 1 {
 		t.Fatalf("reported %d interfaces, want 1", len(out))
@@ -164,6 +170,80 @@ func TestAddressesAreSortedThenCut(t *testing.T) {
 	}
 }
 
+// TestTheCapKeepsTheCardAndDropsTheVeths is the finding this ranking exists for.
+//
+// A Docker workstation has fifty `veth*` interfaces and one `wlp2s0`, and a plain alphabetical cut keeps
+// the veths: "veth" sorts before "wlp". The one row dropped is then the physical card — the only MAC
+// address in the report that identifies the machine to a DHCP server or a switch, which is the whole
+// reason hardware addresses were added. Deterministic and useless is still useless.
+func TestTheCapKeepsTheCardAndDropsTheVeths(t *testing.T) {
+	var interfaces []net.Interface
+	for i := range collect.MaxInterfaces {
+		interfaces = append(interfaces,
+			net.Interface{Name: fmt.Sprintf("veth%03d", i), MTU: 1500, Flags: net.FlagUp})
+	}
+	// Sorts last by name, and first by rank.
+	interfaces = append(interfaces, net.Interface{Name: "wlp2s0", MTU: 1500, Flags: net.FlagUp})
+	// No device of its own, but configured and carrying traffic: it outranks a veth and not a card.
+	interfaces = append(interfaces, net.Interface{Name: "br0", MTU: 1500, Flags: net.FlagUp})
+
+	out, truncated := describeInterfaces(interfaces,
+		func(i net.Interface) ([]net.Addr, error) {
+			if i.Name == "br0" {
+				return []net.Addr{addr("10.0.0.1/24")}, nil
+			}
+			return nil, nil
+		},
+		func(name string) bool { return name == "wlp2s0" })
+
+	if !truncated {
+		t.Fatal("a cut interface list is not flagged as truncated")
+	}
+	byName := map[string]bool{}
+	for _, iface := range out {
+		byName[iface.Name] = true
+	}
+	if !byName["wlp2s0"] {
+		t.Error("the physical card was cut in favour of veth pairs, which is the bug this test exists " +
+			"for: the only hardware address worth having is the one that got dropped")
+	}
+	if !byName["br0"] {
+		t.Error("a configured bridge with an address was cut in favour of veth pairs")
+	}
+
+	// Still alphabetical on the wire. The rank decides what survives; it is not an order a client
+	// should have to know about.
+	for i := 1; i < len(out); i++ {
+		if out[i-1].Name >= out[i].Name {
+			t.Fatalf("the reported list is not sorted by name: %q then %q", out[i-1].Name, out[i].Name)
+		}
+	}
+}
+
+// TestInterfaceRankPrefersRealDevicesThenConfiguredOnes covers the three levels directly.
+//
+// Each level has its own reason, and the middle one is the one that would be lost first: a bond, a
+// bridge and a VLAN have no device of their own but are things somebody configured, so they belong
+// above the veth pairs and below the card.
+func TestInterfaceRankPrefersRealDevicesThenConfiguredOnes(t *testing.T) {
+	physical := func(name string) bool { return name == "eth0" }
+	cases := []struct {
+		reported networkInterface
+		want     int
+	}{
+		{networkInterface{Name: "eth0"}, 0},
+		{networkInterface{Name: "eth0", Addresses: []string{"10.0.0.2/24"}}, 0},
+		{networkInterface{Name: "br0", Addresses: []string{"10.0.0.1/24"}}, 1},
+		{networkInterface{Name: "veth12ab"}, 2},
+		{networkInterface{Name: "docker0"}, 2},
+	}
+	for _, c := range cases {
+		if got := interfaceRank(c.reported, physical); got != c.want {
+			t.Errorf("interfaceRank(%q) = %d, want %d", c.reported.Name, got, c.want)
+		}
+	}
+}
+
 // TestInterfacesAreBoundedAndSaySo covers the cap that was missing until this version.
 //
 // A Docker host has one veth pair per container, so a machine running two hundred containers put two
@@ -175,7 +255,7 @@ func TestInterfacesAreBoundedAndSaySo(t *testing.T) {
 	for i := collect.MaxInterfaces + 9; i > 0; i-- {
 		many = append(many, net.Interface{Name: fmt.Sprintf("veth%03d", i), MTU: 1500, Flags: net.FlagUp})
 	}
-	out, truncated := describeInterfaces(many, noAddresses)
+	out, truncated := describeInterfaces(many, noAddresses, noDevices)
 
 	if len(out) != collect.MaxInterfaces {
 		t.Errorf("reported %d interfaces, want the cap of %d", len(out), collect.MaxInterfaces)
@@ -195,7 +275,7 @@ func TestInterfacesAreBoundedAndSaySo(t *testing.T) {
 // a host that has it.
 func TestAnInterfaceWhoseAddressesCannotBeReadIsStillReported(t *testing.T) {
 	out, _ := describeInterfaces([]net.Interface{{Name: "eth0", MTU: 1500, Flags: net.FlagUp}},
-		func(net.Interface) ([]net.Addr, error) { return nil, fmt.Errorf("netlink refused") })
+		func(net.Interface) ([]net.Addr, error) { return nil, fmt.Errorf("netlink refused") }, noDevices)
 
 	if len(out) != 1 || out[0].Name != "eth0" {
 		t.Fatalf("reported %+v, want eth0 with no addresses", out)

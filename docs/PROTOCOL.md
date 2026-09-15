@@ -327,6 +327,13 @@ refusable by the host's own policy and is **absent** rather than empty when refu
 the policy in the same heartbeat can always say "this host does not report that" rather than "this host
 has none".
 
+The interface list in `extra.network` is capped, and the cut is **not** alphabetical. Interfaces the
+kernel drives a real device for come first, then ones with an address — a bond, a bridge, a VLAN — then
+everything else. Without that, a container host with fifty `veth*` interfaces and one `wlp2s0` would keep
+the veths and drop the wireless card, losing the one hardware address that identifies the machine to
+anything outside HostSeal. The reported list is sorted by name whatever survived, so the ranking decides
+what is sent and never what a client has to parse.
+
 `extra.network` is present unless a host has written `policy.network.report = false`. It ships on, and
 the default is the one place in this document where "on" is not an argument about disclosure: the section
 has been in every release, so a default of false would remove a fact from every existing fleet on the day
@@ -393,7 +400,25 @@ zeroes.
 
 The list is what a disk report can act on rather than everything mounted: pseudo filesystems, `tmpfs`,
 read-only mounts and snap's `squashfs` images are excluded because none of them can fill up, and a disk
-mounted in several places is counted once. One exclusion is the agent's own doing and is stated rather
+mounted in several places is counted once.
+
+**Remote and userspace filesystems — `nfs`, `cifs`, `ceph`, anything `fuse.*` — are excluded for a
+different reason, and it is a hard requirement on any implementation of this section rather than a
+preference.** `statfs(2)` against a hard-mounted share whose server has gone away blocks in
+uninterruptible sleep, where no context, timeout or signal reaches it; an agent that probes one inside
+its heartbeat stops heartbeating for good, and the host disappears from the fleet. An agent MUST NOT
+issue a blocking capacity call it cannot abandon, and abandoning it in a goroutine is not a fix — the
+thread stays blocked and one more leaks on every beat. Skipped mount points are named in `note`, because
+a host whose `/srv` is on NFS would otherwise report no `/srv` at all, which reads as a host that has
+none.
+
+`filesystemsUnmeasured` names mount points that were found and could not be measured — a mount point
+under a directory this unprivileged agent cannot traverse is the usual cause. It is the third answer
+between two wrong ones: a row of zeroes would read as a disk with nothing on it, and a silently missing
+row reads as a host that never had the disk. `scanComplete` is `false` whenever it is present, so a
+client acting on that one boolean is never told the list is complete when it is not. A mount point
+appears there only when *no* mount of its device could be measured, so a disk whose size is reported
+through one path is never also named as unmeasurable through another. One exclusion is the agent's own doing and is stated rather
 than left to be noticed: `ProtectHome=` and `PrivateTmp=` in the agent's systemd unit replace `/home`,
 `/root` and `/tmp` with empty filesystems inside its mount namespace, so a host whose `/home` is a
 separate partition has one this section cannot see. The agent names those paths in `note` instead — `/var/tmp`

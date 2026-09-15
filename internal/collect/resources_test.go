@@ -278,11 +278,14 @@ func TestAnUnreadableProcMakesTheResourceScanIncompleteRatherThanAnError(t *test
 	}
 }
 
-// TestAFilesystemStatfsRefusesIsAbsentRatherThanEmpty covers an unreachable NFS mount.
+// TestAFilesystemStatfsRefusesIsNamedRatherThanDroppedInSilence covers a mount that cannot be measured.
 //
-// The usual cause is a server that has gone away, and the mount then blocks or fails. A row of zeroes
-// would read as a disk with nothing on it, which is the opposite of a disk nobody can measure.
-func TestAFilesystemStatfsRefusesIsAbsentRatherThanEmpty(t *testing.T) {
+// A mount point this agent cannot traverse is the usual cause once remote filesystems are excluded
+// outright. Both obvious answers are wrong in opposite directions: a row of zeroes reads as a disk with
+// nothing on it, and a silently missing row reads as a host that never had the disk. The third answer is
+// no row, a name in filesystemsUnmeasured, a note, and scanComplete false — because a client acting on
+// that one boolean must not be told the list is complete when a disk on it could not be measured.
+func TestAFilesystemStatfsRefusesIsNamedRatherThanDroppedInSilence(t *testing.T) {
 	report := resourcesInWith(t, "ordinary", func(mountPoint string) (filesystemUsage, bool) {
 		if mountPoint == "/var" {
 			return filesystemUsage{}, false
@@ -291,10 +294,119 @@ func TestAFilesystemStatfsRefusesIsAbsentRatherThanEmpty(t *testing.T) {
 	})
 
 	if _, present := byMountPoint(report)["/var"]; present {
-		t.Error("a filesystem statfs refused is in the list")
+		t.Error("a filesystem statfs refused is in the list as a row")
 	}
 	if _, present := byMountPoint(report)["/"]; !present {
 		t.Error("one unmeasurable filesystem removed the others")
+	}
+	if got := strings.Join(report.FilesystemsUnmeasured, " "); got != "/var" {
+		t.Errorf("filesystemsUnmeasured is %q, want %q", got, "/var")
+	}
+	if report.ScanComplete {
+		t.Error("a scan that could not measure a filesystem it found reports itself complete")
+	}
+	if !strings.Contains(report.Note, "/var") {
+		t.Errorf("the note does not name the mount point that could not be measured: %q", report.Note)
+	}
+}
+
+// TestADiskMeasuredThroughOneMountIsNotAlsoCalledUnmeasured covers the two lists disagreeing.
+//
+// The ordinary fixture has /dev/vda1 at both "/" and "/mnt/backup". If the bind mount is the one that
+// cannot be traversed, the disk is still measured — and a report that gave its size in one field and
+// named it as unmeasurable in another would be a report that contradicted itself.
+func TestADiskMeasuredThroughOneMountIsNotAlsoCalledUnmeasured(t *testing.T) {
+	report := resourcesInWith(t, "ordinary", func(mountPoint string) (filesystemUsage, bool) {
+		if mountPoint == "/" {
+			return filesystemUsage{}, false
+		}
+		return fixtureCapacity, true
+	})
+
+	if len(report.FilesystemsUnmeasured) != 0 {
+		t.Errorf("a disk measured through /mnt/backup is also named unmeasured: %v",
+			report.FilesystemsUnmeasured)
+	}
+	if !report.ScanComplete {
+		t.Errorf("the scan reports itself incomplete although every disk was measured: %q", report.Note)
+	}
+}
+
+// TestRemoteFilesystemsAreRefusedAndSaidSo is the one finding on this collector that could stop a fleet.
+//
+// statfs on a hard-mounted NFS share whose server has gone away blocks in uninterruptible sleep: no
+// context, no timeout and no signal reaches it. The scan runs inside the heartbeat, so one such mount
+// would wedge the heartbeat loop and the job poll behind it, and the host would vanish from the fleet
+// list — which is the failure internal/collect is arranged around. The fix is to refuse to ask; this
+// asserts both halves of it, because refusing in silence would leave an operator looking for a /srv the
+// report does not mention.
+func TestRemoteFilesystemsAreRefusedAndSaidSo(t *testing.T) {
+	// A capacity reader that fails the test rather than answering: nothing in the remote fixture may
+	// reach statfs at all, which is the whole point. A stub that returned a plausible number would let
+	// the bug back in while the test went on passing.
+	report := resourcesInWith(t, "remote", func(mountPoint string) (filesystemUsage, bool) {
+		if mountPoint != "/" {
+			t.Errorf("the scan called statfs on %q, which is a remote or userspace mount point and "+
+				"can block this agent for ever", mountPoint)
+		}
+		return fixtureCapacity, true
+	})
+
+	var points []string
+	for _, fs := range report.Filesystems {
+		points = append(points, fs.MountPoint)
+	}
+	if got := strings.Join(points, " "); got != "/" {
+		t.Errorf("filesystems are %q, want just the local root", got)
+	}
+	for _, want := range []string{"/srv/shared", "/mnt/windows", "/mnt/remote-home", "/mnt/ntfs"} {
+		if !strings.Contains(report.Note, want) {
+			t.Errorf("the note does not name the skipped mount %s: %q", want, report.Note)
+		}
+	}
+
+	// Refused by decision rather than by failure, so the scan is complete and the mounts are not named
+	// as unmeasurable. The two are different claims: one says this agent chose not to look, the other
+	// says it looked and could not see.
+	if !report.ScanComplete {
+		t.Errorf("refusing to probe a remote mount made the scan report itself incomplete: %q",
+			report.Note)
+	}
+	if len(report.FilesystemsUnmeasured) != 0 {
+		t.Errorf("a deliberately skipped mount is reported as unmeasurable: %v",
+			report.FilesystemsUnmeasured)
+	}
+}
+
+// TestRefusedFilesystemSeparatesItsTwoReasons covers the predicate directly.
+//
+// The two reasons must stay two reasons: a virtual filesystem has no disk behind it, and a remote or
+// userspace one has a disk this agent must not ask about. Only the second is worth telling an operator,
+// and folding them together would either fill the note with tmpfs rows or drop the sentence that
+// explains a missing /srv.
+func TestRefusedFilesystemSeparatesItsTwoReasons(t *testing.T) {
+	cases := map[string][2]bool{
+		"ext4":           {false, false},
+		"xfs":            {false, false},
+		"btrfs":          {false, false},
+		"bcachefs":       {false, false},
+		"tmpfs":          {true, false},
+		"squashfs":       {true, false},
+		"overlay":        {true, false},
+		"nfs":            {true, true},
+		"nfs4":           {true, true},
+		"cifs":           {true, true},
+		"ceph":           {true, true},
+		"fuse.sshfs":     {true, true},
+		"fuse.ntfs-3g":   {true, true},
+		"fuse.glusterfs": {true, true},
+	}
+	for fsType, want := range cases {
+		refused, remote := refusedFilesystem(fsType)
+		if refused != want[0] || remote != want[1] {
+			t.Errorf("refusedFilesystem(%q) = %t, %t, want %t, %t",
+				fsType, refused, remote, want[0], want[1])
+		}
 	}
 }
 
@@ -429,7 +541,9 @@ func TestAChangeWorthSeeingDoesChangeTheDigest(t *testing.T) {
 // one ships on. That is why every percentage here is a whole number and why the load average is parsed
 // into hundredths by hand rather than through strconv.ParseFloat.
 func TestResourceReportCarriesNoFloatingPointValues(t *testing.T) {
-	for _, scenario := range []string{"ordinary", "ordinary-later", "protected", "sandboxed", "unreadable"} {
+	for _, scenario := range []string{
+		"ordinary", "ordinary-later", "protected", "remote", "sandboxed", "unreadable",
+	} {
 		if _, err := canonical.Marshal(resourcesIn(t, scenario)); err != nil {
 			t.Errorf("%s: the report does not canonicalise: %v", scenario, err)
 		}

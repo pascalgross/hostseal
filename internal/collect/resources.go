@@ -90,9 +90,59 @@ const kibibyte = 1024
 var virtualFilesystems = map[string]bool{
 	"autofs": true, "bpf": true, "binfmt_misc": true, "cgroup": true, "cgroup2": true,
 	"configfs": true, "debugfs": true, "devpts": true, "devtmpfs": true, "efivarfs": true,
-	"fuse.gvfsd-fuse": true, "fusectl": true, "hugetlbfs": true, "mqueue": true, "nsfs": true,
+	"fusectl": true, "hugetlbfs": true, "mqueue": true, "nsfs": true,
 	"overlay": true, "proc": true, "pstore": true, "ramfs": true, "securityfs": true,
 	"squashfs": true, "sysfs": true, "tmpfs": true, "tracefs": true,
+}
+
+// remoteFilesystems are the filesystem types this agent will not ask the kernel about.
+//
+// **This list exists to keep one stale mount from stopping a fleet agent for ever, and that is not a
+// figure of speech.** `statfs(2)` on a hard-mounted NFS share whose server has gone away does not return
+// an error: it blocks in uninterruptible sleep, where no context, no timeout and not even SIGKILL
+// reaches it. The scan runs inside the heartbeat, so a single such mount would wedge the heartbeat loop
+// and the job poll behind it — and the host would drop off the fleet list, which is the one outcome
+// internal/collect/facts.go's whole design is arranged to prevent. Nothing in HostSeal probed an
+// arbitrary mount point until this collector existed, so this hazard arrived with it.
+//
+// Bounding the call instead was considered and is worse. A goroutine with a timeout does not cancel the
+// syscall, it abandons it: the thread stays blocked for the life of the process, and one more leaks on
+// every heartbeat until the runtime's thread limit kills the agent — a crash on a timer in place of a
+// hang, on hosts that are already having a bad day.
+//
+// Refusing to look costs little, because the question was never really this host's. How full a network
+// share is belongs to the machine serving it, which is a host HostSeal can manage on its own account.
+// A skipped mount is named in ResourceReport.Note rather than silently absent.
+var remoteFilesystems = map[string]bool{
+	"9p": true, "afs": true, "beegfs": true, "ceph": true, "cifs": true, "coda": true,
+	"davfs": true, "gfs2": true, "glusterfs": true, "lustre": true, "ncpfs": true, "nfs": true,
+	"nfs4": true, "ocfs2": true, "orangefs": true, "smb3": true, "smbfs": true,
+}
+
+// fusePrefix marks a filesystem served by a userspace daemon.
+//
+// Every one of them is refused, for the reason the remote list is: when the daemon dies, its mount point
+// stops answering and a call into it blocks the same way a dead NFS server does. The cost is that a
+// local FUSE filesystem somebody relies on — ntfs-3g, mergerfs — is not reported either, and that is the
+// right side of the trade: a gap in a disk report is visible and survivable, and a wedged agent is
+// neither.
+const fusePrefix = "fuse."
+
+// refusedFilesystem reports whether a filesystem type is one this collector will not measure.
+//
+// It exists so that the two reasons stay two reasons. A virtual filesystem is skipped because there is
+// no disk behind it to fill up; a remote or userspace one is skipped because asking can hang this
+// process for ever. Folding them into one map would leave a reader to guess which sentence applies to
+// which entry, and the second sentence is the one somebody must not delete by accident.
+func refusedFilesystem(fsType string) (refused, remote bool) {
+	switch {
+	case remoteFilesystems[fsType], strings.HasPrefix(fsType, fusePrefix):
+		return true, true
+	case virtualFilesystems[fsType]:
+		return true, false
+	default:
+		return false, false
+	}
 }
 
 // sandboxedMountPoints are the paths the agent's own systemd sandbox replaces with an empty filesystem.
@@ -295,6 +345,21 @@ type ResourceReport struct {
 	// disagree on purpose rather than by a bug.
 	FilesystemsTruncated bool `json:"filesystemsTruncated,omitempty"`
 
+	// FilesystemsUnmeasured names the mount points this agent found and could not measure.
+	//
+	// It exists because dropping them silently and reporting them as nought bytes are both wrong, in
+	// opposite directions, and the third answer needs somewhere to live. A filesystem whose statfs
+	// failed — a mount point under a directory this unprivileged agent cannot traverse is the usual
+	// cause — has no row here, and without this field that absence is indistinguishable from a host that
+	// never had the filesystem. Those are opposite answers to "is that disk full", which is the one
+	// question this section exists to answer.
+	//
+	// A mount point appears here only when *no* mount of its device could be measured, so a disk whose
+	// size is reported through one path is not also listed as unmeasured through another. ScanComplete
+	// is false whenever this is non-empty: a scan that could not measure everything it found did not
+	// complete, whatever else it managed.
+	FilesystemsUnmeasured []string `json:"filesystemsUnmeasured,omitempty"`
+
 	// Interfaces is per-interface traffic, sorted by name and capped at MaxInterfaces.
 	//
 	// Never nil, for the same reason Filesystems is never nil.
@@ -303,7 +368,13 @@ type ResourceReport struct {
 	// InterfacesTruncated reports that the interface list was cut short.
 	InterfacesTruncated bool `json:"interfacesTruncated,omitempty"`
 
-	// ScanComplete reports whether this agent could read the host's own figures at all.
+	// ScanComplete reports whether this agent read everything it set out to read.
+	//
+	// It covers partial failure as well as total: false means one of the four files could not be read,
+	// *or* that a filesystem this scan found could not be measured. A reader that acts on this one
+	// boolean is then never told a number is complete when it is not, and FilesystemsUnmeasured and Note
+	// say which part was missing. Erring towards false is the safe direction for a flag whose whole job
+	// is to stop a gap from reading as an answer.
 	//
 	// It has no omitempty, deliberately, and the rule is the one stated on RebootReport.Conclusive and
 	// ContainerReport.ScanComplete: a flag whose alarming value is false must not have omitempty, or it
@@ -379,10 +450,11 @@ func collectResourcesFrom(procRoot string, usage func(mountPoint string) (filesy
 		missing = append(missing, filepath.Join(procRoot, "meminfo"))
 	}
 
-	filesystems, hidden, mountsRead := readFilesystems(procRoot, usage)
+	filesystems, unmeasured, hidden, skipped, mountsRead := readFilesystems(procRoot, usage)
 	if !mountsRead {
 		missing = append(missing, filepath.Join(procRoot, "self", "mountinfo"))
 	}
+	report.FilesystemsUnmeasured = unmeasured
 	report.FilesystemsTotal = len(filesystems)
 	if len(filesystems) > MaxFilesystems {
 		filesystems = filesystems[:MaxFilesystems]
@@ -406,6 +478,18 @@ func collectResourcesFrom(procRoot string, usage func(mountPoint string) (filesy
 		// three worth reporting, and the flag is what stops the three from reading as all there is.
 		report.ScanComplete = false
 		notes = append(notes, "this agent could not read "+strings.Join(missing, ", "))
+	}
+	if len(unmeasured) > 0 {
+		// The flag as well as the prose. A client that reads only ScanComplete must not be told the
+		// filesystem list is complete when a disk on it could not be measured.
+		report.ScanComplete = false
+		notes = append(notes, "these mount points were found and could not be measured: "+
+			strings.Join(unmeasured, ", "))
+	}
+	if len(skipped) > 0 {
+		notes = append(notes, "these mount points are on remote or userspace filesystems and are not "+
+			"measured, because a request to one that has stopped answering cannot be interrupted and "+
+			"would stop this agent reporting at all: "+strings.Join(skipped, ", "))
 	}
 	if len(hidden) > 0 {
 		notes = append(notes, "this agent's own systemd sandbox replaces "+strings.Join(hidden, ", ")+
@@ -552,16 +636,17 @@ func readMeminfo(path string) (map[string]int64, bool) {
 // replaced with an empty filesystem is skipped like any other virtual mount, and this is what lets the
 // report say that rather than leaving an operator to notice the partition is missing.
 func readFilesystems(procRoot string, usage func(string) (filesystemUsage, bool)) (
-	out []Filesystem, hidden []string, ok bool) {
+	out []Filesystem, unmeasured, hidden, skipped []string, ok bool) {
 
 	raw, err := os.ReadFile(filepath.Join(procRoot, "self", "mountinfo"))
 	if err != nil {
-		return []Filesystem{}, nil, false
+		return []Filesystem{}, nil, nil, nil, false
 	}
 
 	out = []Filesystem{}
 	var candidates []mountEntry
 	hiddenSeen := map[string]bool{}
+	remoteSeen := map[string]bool{}
 
 	scanner := bufio.NewScanner(bytes.NewReader(raw))
 	for scanner.Scan() {
@@ -569,8 +654,15 @@ func readFilesystems(procRoot string, usage func(string) (filesystemUsage, bool)
 		if !parsed {
 			continue
 		}
-		if virtualFilesystems[entry.fsType] {
-			if sandboxedMountPoints[entry.point] && !hiddenSeen[entry.point] {
+		if refused, remote := refusedFilesystem(entry.fsType); refused {
+			switch {
+			case remote && !remoteSeen[entry.point]:
+				// Named rather than dropped in silence. A host whose /srv is on NFS would otherwise
+				// report no /srv at all, which reads as a host that has none — and the reason this one
+				// is missing is a decision this agent made, not a fact about the machine.
+				remoteSeen[entry.point] = true
+				skipped = append(skipped, entry.point)
+			case sandboxedMountPoints[entry.point] && !hiddenSeen[entry.point]:
 				hiddenSeen[entry.point] = true
 				hidden = append(hidden, entry.point)
 			}
@@ -590,32 +682,47 @@ func readFilesystems(procRoot string, usage func(string) (filesystemUsage, bool)
 	// several is the first in path order rather than whichever the kernel happened to list first.
 	sort.Slice(candidates, func(i, j int) bool { return candidates[i].point < candidates[j].point })
 	sort.Strings(hidden)
+	sort.Strings(skipped)
 
 	// Keyed on the device alone, so a disk mounted in several places is counted once. Both ways of
 	// mounting it twice want that answer: a bind mount is the same filesystem seen again, and a btrfs
 	// subvolume shares its pool's free space, so statfs returns identical figures for every subvolume and
 	// listing five of them would make a fleet's total capacity five times the disk anybody bought.
 	seen := map[string]bool{}
+	var refusedMounts []mountEntry
 	for _, entry := range candidates {
 		if seen[entry.deviceID] {
 			continue
 		}
 		capacity, measured := usage(entry.point)
 		if !measured || capacity.sizeBytes <= 0 {
-			// Not reported at all rather than reported as empty. A filesystem statfs refused — an
-			// unreachable NFS server is the usual reason — has no size this agent knows, and a row of
-			// zeroes would read as a disk with nothing on it.
+			// Not reported as a row, because a row of zeroes would read as a disk with nothing on it —
+			// but named, because dropping it in silence is the other half of the same mistake. A mount
+			// this agent could not measure and a mount the host does not have produce the same absent
+			// row, and they are opposite answers to "is that disk full".
 			//
 			// The device is deliberately *not* marked seen here, so a later mount of the same device
 			// still gets its turn. Marking it would let one unmeasurable mount point suppress a
 			// measurable one — a disk missing from the report because of the path it was asked about
 			// rather than because of anything wrong with the disk.
+			refusedMounts = append(refusedMounts, entry)
 			continue
 		}
 		seen[entry.deviceID] = true
 		out = append(out, describeFilesystem(entry, capacity))
 	}
-	return out, hidden, true
+
+	// A device measured through one of its mount points is measured, whichever other one failed first —
+	// so the comparison is on the device rather than on the path. Comparing paths would let a bind mount
+	// this agent cannot traverse name a disk as unmeasurable in the same report that gives its size,
+	// which is a document contradicting itself.
+	for _, entry := range refusedMounts {
+		if !seen[entry.deviceID] {
+			unmeasured = append(unmeasured, entry.point)
+		}
+	}
+	sort.Strings(unmeasured)
+	return out, unmeasured, hidden, skipped, true
 }
 
 // describeFilesystem turns one mount entry and its capacity into a reported row.

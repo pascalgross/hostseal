@@ -3,6 +3,8 @@ package collector
 import (
 	"context"
 	"net"
+	"os"
+	"path/filepath"
 	"sort"
 
 	"github.com/pascalgross/hostseal/internal/collect"
@@ -14,6 +16,13 @@ import (
 // A host with a large number of virtual addresses — a load balancer, a container host — would otherwise
 // send hundreds of lines every time its facts changed. Ten is enough to recognise a machine.
 const maxAddresses = 10
+
+// sysClassNet is where the kernel publishes per-interface attributes.
+//
+// Only one of them is read — whether a `device` entry exists — and that is what separates a network card
+// from something a container runtime created. See interfaceRank for why that distinction decides which
+// interfaces survive the cap.
+const sysClassNet = "/sys/class/net"
 
 // networkInterface is one interface as reported to the control plane.
 type networkInterface struct {
@@ -101,7 +110,7 @@ func collectNetwork(context.Context) (any, error) {
 	// worried about.
 	out, truncated := describeInterfaces(interfaces, func(i net.Interface) ([]net.Addr, error) {
 		return i.Addrs()
-	})
+	}, hasDevice)
 	if len(out) == 0 {
 		// Reported as an explicit note rather than an empty list. A host with no interfaces at all is
 		// either a container with a very unusual configuration or an agent whose netlink access has
@@ -130,9 +139,16 @@ func collectNetwork(context.Context) (any, error) {
 // this collector its inputs. Everything that decides what a host says lives here; the netlink call and
 // the empty-list note stay with the caller.
 func describeInterfaces(interfaces []net.Interface,
-	addressesOf func(net.Interface) ([]net.Addr, error)) (out []networkInterface, truncated bool) {
+	addressesOf func(net.Interface) ([]net.Addr, error),
+	backedByDevice func(string) bool) (out []networkInterface, truncated bool) {
 
-	out = make([]networkInterface, 0, len(interfaces))
+	// Ranked alongside the rows so the cap below can prefer the interfaces this section exists for,
+	// without the rank itself reaching the wire.
+	type ranked struct {
+		reported networkInterface
+		rank     int
+	}
+	rows := make([]ranked, 0, len(interfaces))
 	for _, iface := range interfaces {
 		// The loopback interface is the same on every host and tells an operator nothing.
 		if iface.Flags&net.FlagLoopback != 0 {
@@ -157,19 +173,74 @@ func describeInterfaces(interfaces []net.Interface,
 				reported.AddressesTruncated = true
 			}
 		}
-		out = append(out, reported)
+		rows = append(rows, ranked{reported: reported, rank: interfaceRank(reported, backedByDevice)})
 	}
 
-	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
-	// Sorted before the cap, so a host over the limit reports the same interfaces on every beat rather
-	// than a different set each time, which would change the facts digest for no reason at all. The cap
-	// itself was missing until this version: a Docker host has one veth pair per container, so a machine
-	// running two hundred containers put two hundred interfaces and up to two thousand addresses into a
-	// document with a one-mebibyte ceiling. docs/PROTOCOL.md §4.5 requires a bound on any section the
-	// agent can grow without limit, and this was one.
-	if len(out) > collect.MaxInterfaces {
-		out = out[:collect.MaxInterfaces]
+	// Ranked first, then named, so the cut is both deterministic and worth having. A plain alphabetical
+	// cut would be deterministic and useless on the host that needs the bound: a Docker workstation with
+	// fifty `veth*` interfaces and one `wlp2s0` keeps the veths and drops the Wi-Fi card, because "veth"
+	// sorts before "wlp" — losing precisely the hardware address this section was added to report.
+	sort.Slice(rows, func(i, j int) bool {
+		if rows[i].rank != rows[j].rank {
+			return rows[i].rank < rows[j].rank
+		}
+		return rows[i].reported.Name < rows[j].reported.Name
+	})
+	// The cap itself was missing until this version: a Docker host has one veth pair per container, so a
+	// machine running two hundred containers put two hundred interfaces and up to two thousand addresses
+	// into a document with a one-mebibyte ceiling. docs/PROTOCOL.md §4.5 requires a bound on any section
+	// the agent can grow without limit, and this was one.
+	if len(rows) > collect.MaxInterfaces {
+		rows = rows[:collect.MaxInterfaces]
 		truncated = true
 	}
+
+	out = make([]networkInterface, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, row.reported)
+	}
+	// Re-sorted by name once the cut is made, because the rank is how this function chooses and the name
+	// is how a reader finds a row. A list whose order encoded an internal judgement would be one a client
+	// had to learn about to read.
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out, truncated
+}
+
+// interfaceRank orders interfaces by how likely one is to be the answer somebody wanted.
+//
+// It decides only which rows survive the cap, never what any row says, and it has three levels because
+// there are three genuinely different kinds of interface on a machine that has more than fifty.
+//
+// A real device behind it ranks first: /sys/class/net/<name>/device exists for a network card the kernel
+// drives, physical or virtio, and does not exist for anything synthesised in software. That is the test
+// udev and `ip link` use, rather than a list of name prefixes that would need a new entry every time a
+// container runtime invented one. It is deliberately not the locally-administered bit in the hardware
+// address: every KVM guest's card is locally administered, which would rank the commonest machine in a
+// fleet below the veth pairs on it.
+//
+// An interface with an address ranks second: a bond, a bridge or a VLAN has no device of its own but
+// carries traffic somebody configured. Everything else ranks last, which on the hosts where this matters
+// means the veth pairs.
+func interfaceRank(reported networkInterface, backedByDevice func(string) bool) int {
+	switch {
+	case backedByDevice(reported.Name):
+		return 0
+	case len(reported.Addresses) > 0:
+		return 1
+	default:
+		return 2
+	}
+}
+
+// hasDevice reports whether the kernel has a real network device behind an interface name.
+//
+// It reads a path rather than taking a parameter for the root, unlike everything in internal/collect,
+// because this package has no fixture trees and the one caller is the live collector — the pure function
+// above takes it as an argument, which is where the testing seam belongs.
+func hasDevice(name string) bool {
+	// Cleaned and taken as a basename, because the name arrives from the kernel through net.Interfaces
+	// and is about to be joined onto a path. Nothing here should be able to walk out of /sys/class/net
+	// even if that assumption ever stops holding.
+	_, err := os.Stat(filepath.Join(sysClassNet, filepath.Base(filepath.Clean(name)), "device"))
+	return err == nil
 }

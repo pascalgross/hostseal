@@ -219,6 +219,12 @@ report = true
 # because the whole value of those numbers is whether they are moving — which does mean an interface
 # dropping the odd unwanted multicast frame is enough to keep a host sending full reports.
 #
+# Network and userspace filesystems — NFS, CIFS, Ceph, anything FUSE — are not measured at all, and that
+# is a safety rule rather than a preference. Asking the kernel how full a hard-mounted NFS share is, when
+# its server has gone away, blocks in a way no timeout and no signal can interrupt — which would stop this
+# agent heartbeating for good and drop the host off your fleet list. How full a share is belongs to the
+# machine serving it. Skipped mount points are named in the report rather than silently missing.
+#
 # What it cannot see is what the agent's own sandbox hides from it. ProtectHome= and PrivateTmp= in the
 # agent's systemd unit replace /home, /root, /tmp and /var/tmp with empty filesystems inside the agent's
 # mount namespace, so a separate /home partition is not in this report. The report names those paths in
