@@ -397,6 +397,10 @@ func (s *Server) routes() {
 	s.route(http.MethodGet, "/api/v1/tenants/{id}", s.requirePlatform(s.handleGetTenant))
 	s.route(http.MethodPatch, "/api/v1/tenants/{id}", s.requirePlatform(s.handleUpdateTenant))
 	s.route(http.MethodDelete, "/api/v1/tenants/{id}", s.requirePlatform(s.handleDeleteTenant))
+	// How large a fleet is, and nothing else about it. The one route on which the platform role learns
+	// something from inside a tenant, and it learns two integers — see handleTenantUsage for why that
+	// is a smaller disclosure than the alternative it replaced.
+	s.route(http.MethodGet, "/api/v1/tenants/{id}/usage", s.requirePlatform(s.handleTenantUsage))
 
 	// Unauthenticated, and deliberately so: a health check that needs a credential is a health check
 	// the load balancer cannot perform.
@@ -726,6 +730,26 @@ func (s *Server) requireAgent(next func(http.ResponseWriter, *http.Request, call
 			// a bug in the agent or a copy of a file somewhere it should not be.
 			writeError(w, http.StatusUnauthorized, "superseded",
 				"this certificate was replaced by a renewal; present the current one")
+			return
+		}
+
+		// A suspended fleet is refused before its host is even loaded. One extra indexed lookup per
+		// agent request, which is proportionate: this handler already does two, and an agent checks in
+		// on the order of once a minute rather than once a second.
+		//
+		// It is refusal and not reach. The agent goes on running, goes on applying this host's own
+		// local policy and goes on installing security updates on its own timer — which is exactly what
+		// it does when the control plane is unreachable for any other reason, a state docs/INSTALL.md
+		// already documents as supported because an outage produces it. Nothing here touches a machine.
+		tenantRow, err := s.cfg.Store.GetTenant(r.Context(), cert.TenantID)
+		switch {
+		case err != nil:
+			slog.Error("could not read a tenant", "error", err, "tenant", cert.TenantID)
+			writeError(w, http.StatusInternalServerError, "internal", "could not load the fleet")
+			return
+		case tenantRow.Suspended:
+			writeError(w, http.StatusForbidden, "tenant_suspended",
+				"this fleet is suspended; its agents are not being answered")
 			return
 		}
 

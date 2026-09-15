@@ -322,6 +322,19 @@ func TestGuaranteeOneTenantCannotSeeAnother(t *testing.T) {
 					t.Fatalf("found %+v", host)
 				}
 			},
+			"CountHosts": func(t *testing.T) {
+				// The count is what a host limit is checked against and what a hosting provider bills,
+				// so a count that saw across the boundary would be a customer charged for somebody
+				// else's machines — and unlike a leaked hostname, nobody would recognise the number as
+				// belonging to anyone.
+				counts, err := alpha.CountHosts(ctx)
+				if err != nil {
+					t.Fatalf("counting: %v", err)
+				}
+				if counts.Total != 1 || counts.Active != 1 {
+					t.Fatalf("alpha counts %+v; it has one host and every other host is beta's", counts)
+				}
+			},
 			"ListHosts": func(t *testing.T) {
 				hosts, err := alpha.ListHosts(ctx)
 				if err != nil {
@@ -1689,12 +1702,8 @@ func TestGuaranteeATenantsApprovalModeCannotRewriteAJobAlreadyQueued(t *testing.
 		}
 
 		// The operator relaxes their own fleet's rule, which is a thing they are allowed to do.
-		stored, err := s.GetTenant(ctx, tenant.Tenant())
-		if err != nil {
-			t.Fatalf("reading the tenant: %v", err)
-		}
-		stored.ApprovalMode = ApprovalNone
-		if err := s.UpdateTenant(ctx, stored); err != nil {
+		relaxed := ApprovalNone
+		if _, err := s.UpdateTenant(ctx, tenant.Tenant(), TenantPatch{ApprovalMode: &relaxed}); err != nil {
 			t.Fatalf("relaxing the tenant: %v", err)
 		}
 

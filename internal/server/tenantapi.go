@@ -1,6 +1,7 @@
 package server
 
 import (
+	"encoding/json"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -44,6 +45,43 @@ type tenantRequest struct {
 
 	// WebhookURL is where this tenant's events are posted.
 	WebhookURL *string `json:"webhookUrl,omitempty"`
+
+	// HostLimit is how many hosts may be enrolled, or null for no limit.
+	HostLimit nullableInt `json:"hostLimit,omitempty"`
+
+	// Suspended is whether the control plane refuses this fleet's agent requests.
+	Suspended *bool `json:"suspended,omitempty"`
+}
+
+// nullableInt is a number that may be sent, sent as null, or left out entirely.
+//
+// Three states, where a `*int` has two, and the third one is the reason this type exists: `hostLimit`
+// uses null to mean *no limit*, so a plain pointer could not tell "remove this fleet's limit" from "I
+// did not mention the limit". A PATCH that changed only an approval mode would have silently removed
+// the limit, which is a billing failure that looks like nothing at all.
+//
+// UnmarshalJSON runs only for a key that is present, which is what makes Set trustworthy.
+type nullableInt struct {
+	// Set reports that the field appeared in the request body, whatever its value.
+	Set bool
+
+	// Value is the number, or nil for an explicit null.
+	Value *int
+}
+
+// UnmarshalJSON records that the field was present, and what it held.
+func (n *nullableInt) UnmarshalJSON(data []byte) error {
+	n.Set = true
+	if string(data) == "null" {
+		n.Value = nil
+		return nil
+	}
+	var value int
+	if err := json.Unmarshal(data, &value); err != nil {
+		return err
+	}
+	n.Value = &value
+	return nil
 }
 
 // tenantView is what the API renders for a tenant.
@@ -65,6 +103,12 @@ type tenantView struct {
 
 	// WebhookURL is where this tenant's events go, empty for nowhere.
 	WebhookURL string `json:"webhookUrl"`
+
+	// HostLimit is how many hosts may be enrolled, null for no limit.
+	HostLimit *int `json:"hostLimit"`
+
+	// Suspended is whether the control plane refuses this fleet's agent requests.
+	Suspended bool `json:"suspended"`
 }
 
 // toTenantView renders a stored tenant.
@@ -76,6 +120,8 @@ func toTenantView(t store.Tenant) tenantView {
 		CreatedAt:    t.CreatedAt,
 		ApprovalMode: string(t.ApprovalMode),
 		WebhookURL:   t.WebhookURL,
+		HostLimit:    t.HostLimit,
+		Suspended:    t.Suspended,
 	}
 }
 
@@ -154,6 +200,10 @@ func (s *Server) handleCreateTenant(w http.ResponseWriter, r *http.Request, who 
 		return
 	}
 
+	if !checkHostLimit(w, req.HostLimit) {
+		return
+	}
+
 	tenant := store.Tenant{
 		ID:           store.TenantID(id),
 		Slug:         req.Slug,
@@ -161,6 +211,10 @@ func (s *Server) handleCreateTenant(w http.ResponseWriter, r *http.Request, who 
 		CreatedAt:    time.Now().UTC(),
 		ApprovalMode: mode,
 		WebhookURL:   webhook,
+		// Absent means no limit, which is what an installation that is not selling this wants and what
+		// `hostseal-server serve` creates for its own fleet.
+		HostLimit: req.HostLimit.Value,
+		Suspended: req.Suspended != nil && *req.Suspended,
 	}
 	switch err := s.cfg.Store.CreateTenant(r.Context(), tenant); {
 	case errors.Is(err, store.ErrConflict):
@@ -174,7 +228,7 @@ func (s *Server) handleCreateTenant(w http.ResponseWriter, r *http.Request, who 
 
 	slog.Info("tenant created",
 		"tenant", tenant.ID, "slug", tenant.Slug, "approval_mode", tenant.ApprovalMode,
-		"platform_operator", who.Principal())
+		"host_limit", limitForLog(tenant.HostLimit), "platform_operator", who.Principal())
 	writeJSON(w, http.StatusCreated, toTenantView(tenant))
 }
 
@@ -215,14 +269,13 @@ func (s *Server) handleUpdateTenant(w http.ResponseWriter, r *http.Request, who 
 			"a tenant's slug cannot be changed: it is what logs and support tickets refer to")
 		return
 	}
-	if req.DisplayName != nil {
-		tenant.DisplayName = *req.DisplayName
-	}
-	if req.WebhookURL != nil {
-		if !checkWebhookURL(w, *req.WebhookURL) {
-			return
-		}
-		tenant.WebhookURL = *req.WebhookURL
+	// A patch of exactly what this request asked to change, rather than the whole row read a moment
+	// ago. Writing back every field would mean two concurrent edits each restoring the other's stale
+	// values — and the hosting layer sets the host limit and the suspension in two separate requests,
+	// so a fleet could come out of suspension because somebody renamed it at the wrong moment.
+	patch := store.TenantPatch{DisplayName: req.DisplayName, WebhookURL: req.WebhookURL}
+	if req.WebhookURL != nil && !checkWebhookURL(w, *req.WebhookURL) {
+		return
 	}
 	if req.ApprovalMode != nil {
 		mode := store.ApprovalMode(*req.ApprovalMode)
@@ -231,10 +284,24 @@ func (s *Server) handleUpdateTenant(w http.ResponseWriter, r *http.Request, who 
 				`approvalMode is one of "none", "self" or "second_person"; see docs/SECURITY.md §3`)
 			return
 		}
-		tenant.ApprovalMode = mode
+		patch.ApprovalMode = &mode
 	}
+	if req.HostLimit.Set {
+		if !checkHostLimit(w, req.HostLimit) {
+			return
+		}
+		// Lowering the limit below the fleet's current size is allowed and does nothing to the hosts
+		// that are already there. It is not an oversight that this handler does not go and revoke the
+		// excess: a setting that could take a running host away from its operator would be a lever on
+		// an enrolled host, and there are none of those in this control plane. What it changes is the
+		// answer the enrolment endpoint gives the next machine.
+		patch.SetHostLimit = true
+		patch.HostLimit = req.HostLimit.Value
+	}
+	patch.Suspended = req.Suspended
 
-	if err := s.cfg.Store.UpdateTenant(r.Context(), tenant); err != nil {
+	tenant, err = s.cfg.Store.UpdateTenant(r.Context(), id, patch)
+	if err != nil {
 		slog.Error("could not update a tenant", "error", err, "tenant", id)
 		writeError(w, http.StatusInternalServerError, "internal", "could not update the tenant")
 		return
@@ -242,6 +309,7 @@ func (s *Server) handleUpdateTenant(w http.ResponseWriter, r *http.Request, who 
 
 	slog.Info("tenant updated",
 		"tenant", tenant.ID, "slug", tenant.Slug, "approval_mode", tenant.ApprovalMode,
+		"host_limit", limitForLog(tenant.HostLimit), "suspended", tenant.Suspended,
 		"platform_operator", who.Principal())
 	writeJSON(w, http.StatusOK, toTenantView(tenant))
 }
@@ -314,6 +382,82 @@ func (s *Server) handleWhoami(w http.ResponseWriter, r *http.Request, who auth.I
 	}
 	answer["tenant"] = toTenantView(tenant)
 	writeJSON(w, http.StatusOK, answer)
+}
+
+// handleTenantUsage reports how large a fleet is, and nothing else about it.
+//
+// This is the one route that lets the platform role learn something about the inside of a fleet, and
+// what it learns is two integers and a timestamp. That is deliberate and it is the whole design: an
+// installation run for other people has to be able to count what it is charging for, and the honest
+// alternative — before this existed — was for the hosting provider to hold an operator account inside
+// every customer's fleet, which is a credential that can queue jobs, read facts and revoke hosts, held
+// by somebody who wanted to count to three.
+//
+// So the disclosure is made as small as it can be while still answering the question. No hostname, no
+// group, no agent version, no fact, no job. A customer can read this endpoint's response and see that
+// it could not have told anybody what their machines are called.
+//
+// The count itself runs through Store.In, so the row-level security policy answers it exactly as it
+// answers every other read of a tenant-owned table. There is no exemption here and there must not be
+// one.
+func (s *Server) handleTenantUsage(w http.ResponseWriter, r *http.Request, _ auth.Identity) {
+	id := store.TenantID(r.PathValue("id"))
+	tenant, err := s.cfg.Store.GetTenant(r.Context(), id)
+	switch {
+	case errors.Is(err, store.ErrNotFound):
+		writeError(w, http.StatusNotFound, "unknown_tenant", "no such tenant")
+		return
+	case err != nil:
+		slog.Error("could not read a tenant", "error", err)
+		writeError(w, http.StatusInternalServerError, "internal", "could not read the tenant")
+		return
+	}
+
+	counts, err := s.cfg.Store.In(id).CountHosts(r.Context())
+	if err != nil {
+		slog.Error("could not count a tenant's hosts", "error", err, "tenant", id)
+		writeError(w, http.StatusInternalServerError, "internal", "could not count the hosts")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"tenant": string(id),
+		"slug":   tenant.Slug,
+		// Every host row the fleet holds, and the subset whose certificates are still accepted. Both,
+		// because a revoked host stops counting against a limit and stops being billable at the same
+		// moment, and a caller reconciling an invoice needs to see that the two agree.
+		"hosts":        counts.Total,
+		"activeHosts":  counts.Active,
+		"revokedHosts": counts.Total - counts.Active,
+		"hostLimit":    tenant.HostLimit,
+		"suspended":    tenant.Suspended,
+		// The moment the count was taken, so that a caller storing it as the evidence behind an invoice
+		// stores when it was true rather than when it was read.
+		"asOf": time.Now().UTC(),
+	})
+}
+
+// checkHostLimit answers the request itself when a host limit is one the schema would refuse.
+//
+// Refused here rather than left to the CHECK constraint, because a constraint violation arrives as a
+// 500 and a negative host limit is a caller's mistake they can fix from the message. Zero is allowed
+// and means what it says: a fleet that may hold no hosts, which is what a tenant looks like between
+// being created and being paid for.
+func checkHostLimit(w http.ResponseWriter, limit nullableInt) bool {
+	if limit.Value != nil && *limit.Value < 0 {
+		writeError(w, http.StatusBadRequest, "malformed",
+			"hostLimit must be zero or more, or null for no limit")
+		return false
+	}
+	return true
+}
+
+// limitForLog renders a host limit for a log line, where a nil pointer would print as an address.
+func limitForLog(limit *int) any {
+	if limit == nil {
+		return "none"
+	}
+	return *limit
 }
 
 // checkWebhookURL answers the request itself when a webhook URL is one HostSeal will not post to.
