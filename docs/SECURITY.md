@@ -696,6 +696,48 @@ it exists so the interface can say *what this credential is for* instead of rend
 to somebody whose account administers the installation rather than a fleet in it. The one other route
 both reach is `/api/v1/account`: everybody has an account, and everybody has a password to change.
 
+There are two settings the platform role administers that reach *into* a fleet's behaviour, and one
+route through which it learns something about a fleet's contents. Both are new, both are narrower than
+what they replace, and both are worth stating plainly rather than leaving to be discovered.
+
+**`hostLimit` — how many hosts may enrol.** `NULL` for no limit, which is the default and what
+`hostseal-server serve` creates. It is checked twice, and the two checks answer different questions.
+The enrolment handler checks it after the machine-id claim and before the token is consumed, so that
+the ordinary refusal leaves the token usable. That check is a courtesy and not the boundary: it reads a
+count and writes the host several statements later, so two machines presenting two valid tokens into a
+fleet with one slot left both pass it. `Scoped.CreateEnrolledHost` is where the limit is *enforced* —
+it locks the fleet's row, counts and writes inside one transaction, and answers `ErrHostLimitReached`
+when there is no room, which the handler renders as the same `403 host_limit_reached`.
+`TestGuaranteeAHostLimitHoldsAgainstSimultaneousEnrolments` enrols twelve machines at once into a fleet
+of three and is the test for that; without the row lock, six get in. What makes the setting safe to
+exist is
+the asymmetry: **lowering a limit below a fleet's current size revokes nothing, pauses nothing and
+reaches no machine.** Hosts that are enrolled stay enrolled and stay accepted; what changes is the
+answer the next machine gets. A setting that could take a running host away from its operator would be
+the first lever in this control plane able to act on an enrolled host, and [§1](#1-the-guarantee) is a
+promise that there are none.
+`TestGuaranteeAHostLimitNeverReachesAnEnrolledHost` is where that is enforced rather than described.
+
+**`suspended` — whether this fleet's agents are answered.** A suspended fleet's requests are refused
+with `403 tenant_suspended`, at enrolment and on every authenticated agent route. It is refusal, not
+reach. The agent goes on running, goes on applying the host's own local policy and goes on installing
+security updates on its own timer — which is exactly what it does when the control plane is unreachable
+for any other reason, a state [`docs/INSTALL.md`](INSTALL.md) already documents as supported because an
+outage produces it. Nothing is uninstalled, nothing is deleted, and one field reverses it.
+
+**`GET /api/v1/tenants/{id}/usage` — how large a fleet is.** It answers with a total, an active count, a
+revoked count, the limit, the suspension state and a timestamp. No hostname, no group, no agent
+version, no fact, no job. The count runs through `Store.In(tenant)` like every other read of a
+tenant-owned table, so [§5.2](#52-where-the-boundary-is-enforced)'s policy answers it; there is no
+exemption here and there must not be one.
+
+This is a real widening of the platform role and it is stated as one: it can now learn an integer about
+a fleet it previously could not. The reason to accept it is what it replaces. Before it existed, an
+installation billing per host had exactly one way to count — an operator account *inside* the
+customer's fleet, which can queue jobs, read facts and revoke hosts, held by somebody who wanted to
+count to three. Given the choice between a credential that reaches everything and a route that returns
+a number, the number is the smaller disclosure, and it is the one this document is willing to defend.
+
 The honest limit: a platform administrator has the database and the process. Nothing here prevents
 somebody with shell access on the control plane from reading a tenant's rows, and this document does
 not claim otherwise. What it prevents is *the product* offering that as a feature, and a bug offering

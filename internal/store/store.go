@@ -45,6 +45,14 @@ var (
 	// reconnaissance, so the distinction is not carried out of the store at all rather than being
 	// carried and then remembered not to reveal.
 	ErrTokenUnusable = errors.New("store: token unusable")
+
+	// ErrHostLimitReached reports a fleet that already holds as many active hosts as it may.
+	//
+	// It comes from CreateEnrolledHost rather than from a check the caller makes, because a caller's
+	// check cannot be atomic with the insert: two machines enrolling at once with two valid tokens
+	// would both read a count with room in it and both write. The server checks the limit early too,
+	// to refuse before it spends a token, and this is the one that decides.
+	ErrHostLimitReached = errors.New("store: fleet is at its host limit")
 )
 
 // EnrollmentToken authorises exactly one enrolment.
@@ -1010,6 +1018,68 @@ type Tenant struct {
 	// feature but a leak: one list of sinks for the whole installation delivers one customer's
 	// hostnames and operator names to another customer's endpoint.
 	WebhookURL string
+
+	// HostLimit is how many hosts may be enrolled into this fleet, or nil for no limit.
+	//
+	// A pointer rather than an int, because zero is a limit somebody means — a fleet that may hold no
+	// hosts yet — and "no limit" has to be a different value from "none allowed". Every installation
+	// that is not selling this leaves it nil, which is what `hostseal-server serve` creates.
+	//
+	// It gates enrolment and nothing else. Lowering it below a fleet's current size revokes nothing and
+	// reaches no machine: the hosts that are enrolled stay enrolled, and the next machine to present a
+	// token is refused. A setting that could take a running host away from its operator would be a
+	// lever on an enrolled host, which is the one thing this control plane does not build.
+	HostLimit *int
+
+	// Suspended is whether the control plane refuses this fleet's agent requests.
+	//
+	// It is refusal rather than reach: a suspended fleet's agents keep running, keep applying the
+	// host's own local policy and keep installing security updates on their own timer, exactly as they
+	// do when the control plane is unreachable for any other reason. Nothing is uninstalled and nothing
+	// is deleted.
+	Suspended bool
+}
+
+// TenantPatch is the subset of a tenant's settings a caller is changing.
+//
+// A pointer per field, because "leave this alone" and "set this to its zero value" are different
+// requests and a plain struct cannot tell them apart: an empty display name, an empty webhook URL and
+// `suspended = false` are all things somebody legitimately asks for.
+//
+// It exists so that a tenant update is one statement rather than a read, a change and a write. The
+// read-modify-write it replaced lost concurrent edits by construction — each caller wrote back every
+// field from the row it had read, so whichever committed last silently restored the other's stale
+// values. With the hosting layer setting the host limit and the suspension through two separate
+// requests, that was a fleet coming out of suspension because somebody renamed it at the wrong moment.
+type TenantPatch struct {
+	// DisplayName, ApprovalMode and WebhookURL are written when non-nil.
+	DisplayName  *string
+	ApprovalMode *ApprovalMode
+	WebhookURL   *string
+
+	// HostLimit needs two fields rather than one, because nil is a value here: it means "no limit".
+	// SetHostLimit is what says the caller is writing the column at all.
+	HostLimit    *int
+	SetHostLimit bool
+
+	// Suspended is written when non-nil.
+	Suspended *bool
+}
+
+// HostCounts is how large a fleet is, and nothing else about it.
+//
+// It exists so that the platform role can be told a number without being given a fleet. Whoever runs an
+// installation for other people has to be able to count what they are charging for; letting them read
+// a host list to do it would mean hostnames, facts and jobs for a question whose answer is an integer.
+type HostCounts struct {
+	// Total is every host row this fleet holds, revoked ones included.
+	Total int
+
+	// Active is the hosts whose certificates the control plane still accepts.
+	//
+	// This is the number a host limit is checked against and the number a hosting provider bills for.
+	// A revoked host keeps its row for the audit trail and stops counting the moment it is revoked.
+	Active int
 }
 
 // Store is the control plane's persistence.
@@ -1111,7 +1181,14 @@ type Store interface {
 	// deliberate and it is the same rule migration 0002 wrote down for approval_required: a job records
 	// what it required, so relaxing the setting cannot release work that was queued under a stricter
 	// one.
-	UpdateTenant(ctx context.Context, t Tenant) error
+	//
+	// It takes a patch rather than a whole tenant because a whole tenant is a lost update waiting to
+	// happen: two callers that each read the row, change one field and write all of them will each
+	// restore the other's stale values. That is not hypothetical here — the hosting layer sets the host
+	// limit and the suspension in two separate requests, so an administrator editing the approval mode
+	// in between could put a suspended fleet back into service. Only the fields the patch carries are
+	// written, in one statement, so there is no window between the read and the write to lose.
+	UpdateTenant(ctx context.Context, id TenantID, patch TenantPatch) (Tenant, error)
 
 	// DeleteTenant removes a tenant and everything belonging to it.
 	DeleteTenant(ctx context.Context, id TenantID) error
@@ -1193,12 +1270,20 @@ type Scoped interface {
 	// Unknown, expired and consumed are one error here for the same reason they are everywhere else.
 	GetEnrollmentToken(ctx context.Context, hash string) (EnrollmentToken, error)
 
-	// CreateEnrolledHost records a newly enrolled host and its first certificate together.
+	// CreateEnrolledHost records a newly enrolled host and its first certificate together, if the
+	// fleet's host limit leaves room. It answers ErrHostLimitReached when it does not.
 	//
-	// The two are one operation because half of it is worse than neither. A host row without its
+	// The two writes are one operation because half of it is worse than neither. A host row without its
 	// certificate is a machine that cannot authenticate and, because its machine-id hash is taken,
 	// cannot enrol again either — permanently stuck on a failure that happened once, in a fraction of a
 	// second, on the server.
+	//
+	// The limit is enforced *here*, inside that same transaction, rather than being left to the caller.
+	// A caller can only count and then write, and between those two statements another enrolment fits:
+	// two machines presenting two valid tokens into a fleet with one slot left both see room and both
+	// take it. Autoscaling and batch provisioning make that the ordinary case rather than the unlucky
+	// one. The limit read here is the one current at the moment of the write, so raising a limit takes
+	// effect immediately and lowering one still revokes nothing.
 	CreateEnrolledHost(ctx context.Context, h Host, c Certificate) error
 
 	// GetHost returns one host by id, or ErrNotFound.
@@ -1215,6 +1300,15 @@ type Scoped interface {
 
 	// ListHosts returns every host in this tenant, ordered by hostname.
 	ListHosts(ctx context.Context) ([]Host, error)
+
+	// CountHosts returns how many hosts this tenant has, without returning any of them.
+	//
+	// A separate method rather than len(ListHosts(...)) for two reasons that are not about speed. The
+	// platform API answers a usage question with it, and a method that returns two integers cannot be
+	// made to leak a hostname by a later refactor; and the enrolment path calls it on every enrolment
+	// into a limited fleet, where loading a fleet to count it would be work proportional to the fleet
+	// for an answer that is not.
+	CountHosts(ctx context.Context) (HostCounts, error)
 
 	// RecordHeartbeat applies a heartbeat's fields to a host.
 	RecordHeartbeat(ctx context.Context, hostID string, u HeartbeatUpdate) error

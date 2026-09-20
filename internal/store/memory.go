@@ -326,31 +326,46 @@ func (m *Memory) ListTenants(_ context.Context) ([]Tenant, error) {
 	return out, nil
 }
 
-// UpdateTenant applies a tenant's display name, approval mode and webhook URL.
+// UpdateTenant applies a tenant's display name, approval mode, webhook URL, host limit and suspension.
 //
 // The id, the slug and the creation time are not editable: they are what other rows, URLs and support
 // tickets refer to, and a customer changing what they are called must not change what they are.
 //
 // Nothing already queued is revisited. A job records the approval rule it was created under, so
 // relaxing this setting cannot release work that was queued under a stricter one.
-func (m *Memory) UpdateTenant(_ context.Context, t Tenant) error {
-	mode, err := normaliseApprovalMode(t.ApprovalMode)
-	if err != nil {
-		return err
-	}
-
+func (m *Memory) UpdateTenant(_ context.Context, id TenantID, patch TenantPatch) (Tenant, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	existing, ok := m.tenants[t.ID]
+	existing, ok := m.tenants[id]
 	if !ok {
-		return ErrNotFound
+		return Tenant{}, ErrNotFound
 	}
-	existing.DisplayName = t.DisplayName
-	existing.ApprovalMode = mode
-	existing.WebhookURL = t.WebhookURL
-	m.tenants[t.ID] = existing
-	return nil
+
+	// Field by field, matching the PostgreSQL statement: only what the patch carries is written, so a
+	// caller changing one setting cannot restore stale values for the others.
+	if patch.DisplayName != nil {
+		existing.DisplayName = *patch.DisplayName
+	}
+	if patch.ApprovalMode != nil {
+		mode, err := normaliseApprovalMode(*patch.ApprovalMode)
+		if err != nil {
+			return Tenant{}, err
+		}
+		existing.ApprovalMode = mode
+	}
+	if patch.WebhookURL != nil {
+		existing.WebhookURL = *patch.WebhookURL
+	}
+	if patch.SetHostLimit {
+		existing.HostLimit = patch.HostLimit
+	}
+	if patch.Suspended != nil {
+		existing.Suspended = *patch.Suspended
+	}
+
+	m.tenants[id] = existing
+	return existing, nil
 }
 
 // DeleteTenant removes a tenant and everything belonging to it.
@@ -723,13 +738,30 @@ func (s *scopedMemory) ListEnrollmentTokens(_ context.Context) ([]EnrollmentToke
 // tenant, because 0004 narrowed that index to (tenant_id, machine_id_hash) so that enrolling a machine
 // somebody else already has does not tell you that they have it; and the certificate must name the host
 // being enrolled, because the composite foreign key refuses one that points anywhere else.
+//
+// The host limit is checked here too, under the same lock the writes happen under, because that is what
+// the PostgreSQL store does with its row lock and a test that passed against one implementation and not
+// the other would be worse than no test.
 func (s *scopedMemory) CreateEnrolledHost(_ context.Context, h Host, c Certificate) error {
 	m := s.store
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	if _, ok := m.tenants[s.tenant]; !ok {
+	tenant, ok := m.tenants[s.tenant]
+	if !ok {
 		return errUnknownTenant(s.tenant)
+	}
+	if tenant.HostLimit != nil {
+		// Active, not total: revoking a host is how an operator makes room for another one.
+		active := 0
+		for _, row := range m.hosts {
+			if row.tenant == s.tenant && !row.host.Revoked {
+				active++
+			}
+		}
+		if active >= *tenant.HostLimit {
+			return ErrHostLimitReached
+		}
 	}
 	if c.HostID != h.ID {
 		return fmt.Errorf("store: certificate %q names host %q, not the host being enrolled %q",
@@ -820,6 +852,29 @@ func (s *scopedMemory) GetHostByMachineID(_ context.Context, hash string) (Host,
 		}
 	}
 	return Host{}, ErrNotFound
+}
+
+// CountHosts returns how many hosts this tenant has, without returning any of them.
+//
+// Written out rather than delegating to ListHosts, for the reason every method in this file is: this
+// stands in for a statement the database runs, and a stand-in that reached its answer differently would
+// let a test pass here and fail there. The tenant filter is the same one, applied the same way.
+func (s *scopedMemory) CountHosts(_ context.Context) (HostCounts, error) {
+	m := s.store
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	var counts HostCounts
+	for _, row := range m.hosts {
+		if row.tenant != s.tenant {
+			continue
+		}
+		counts.Total++
+		if !row.host.Revoked {
+			counts.Active++
+		}
+	}
+	return counts, nil
 }
 
 // ListHosts returns this tenant's hosts, ordered by hostname then id.

@@ -168,6 +168,7 @@ approves another.
 | --- | --- |
 | `400` | Malformed body or CSR |
 | `401` | Token unknown, expired, or already used |
+| `403` | `host_limit_reached` — the fleet is at its host limit; `tenant_suspended` — the fleet is suspended. Neither consumes the token, with one exception: when two machines contend for a fleet's last slot the loser is refused by the atomic check, which happens after redemption, and its message says the token was spent |
 | `409` | A host with this `machineIdHash` is already enrolled |
 | `429` | Rate limited; honour `Retry-After` |
 
@@ -778,6 +779,7 @@ could not phone home would have made the fleet less safe by being installed.
 | --- | --- | --- |
 | `400` | Any endpoint, for a body that does not parse | Log and drop. An unparseable request will not become parseable on a retry |
 | `401` | Any authenticated endpoint | Certificate rejected, revoked, or superseded by a renewal whose overlap has passed. Stop calling; log loudly. Do **not** re-enrol automatically — a host that re-enrols itself on `401` is a host an attacker can cause to re-enrol. Keep patching from local policy |
+| `403` | `POST /enroll`, and any authenticated endpoint | The fleet is suspended (`tenant_suspended`) or, on enrolment only, at its host limit (`host_limit_reached`). Both are settings an administrator of the installation holds and both are reversible, so back off and retry rather than stopping: unlike a `401`, this becomes untrue when somebody changes a row. Neither reaches this machine — keep applying local policy and keep patching |
 | `404` | `POST /jobs/{id}/result` | The job does not exist, or belongs to another host. Drop the result |
 | `409` | `POST /enroll` | A host with this `machineIdHash` is already enrolled. Stop and require operator action: revoking or deleting the existing host releases the machine |
 | `413` | `POST /heartbeat`, `POST /jobs/{id}/result` | Body too large. Truncate further, set the affected section's truncated flag, retry once, then drop |

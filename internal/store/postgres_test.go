@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"testing"
 	"time"
@@ -707,5 +708,187 @@ func TestDeleteHostTakesItsDependentRowsWithIt(t *testing.T) {
 	}
 	if err := tenant.DeleteHost(ctx, "01JNOSUCHHOST"); !errors.Is(err, ErrNotFound) {
 		t.Errorf("deleting an unknown host produced %v, want ErrNotFound", err)
+	}
+}
+
+// TestGuaranteeAHostLimitHoldsAgainstSimultaneousEnrolments enrols more machines at once than the
+// fleet may hold, and asserts the fleet does not exceed its limit.
+//
+// This is the test for a race a code review found and the earlier tests did not: the server counted a
+// fleet's hosts in one statement and wrote the new host in another, so two machines presenting two
+// valid tokens into a fleet with one slot left both read a count with room in it and both wrote. The
+// limit is the entitlement a customer is billed against, and batch provisioning — a autoscaling group
+// coming up, a rack being enrolled from a loop — makes simultaneous enrolment the ordinary case rather
+// than the unlucky one.
+//
+// It runs against PostgreSQL only, deliberately. The in-memory store takes one lock around the whole
+// operation, so it cannot exhibit this bug and cannot prove its absence either; what is being tested is
+// that the row lock and the transaction do their job against a real database with real concurrency.
+func TestGuaranteeAHostLimitHoldsAgainstSimultaneousEnrolments(t *testing.T) {
+	pg := newPostgres(t)
+	ctx := context.Background()
+
+	const limit = 3
+	const racers = 12
+
+	scoped := testTenant(t, pg, "crowded", ApprovalNone)
+	allowed := limit
+	if _, err := pg.UpdateTenant(ctx, scoped.Tenant(), TenantPatch{
+		SetHostLimit: true, HostLimit: &allowed,
+	}); err != nil {
+		t.Fatalf("setting the host limit: %v", err)
+	}
+
+	// All of them wait on one channel and are released together, which is what makes this a race rather
+	// than twelve sequential enrolments that happen to use goroutines.
+	start := make(chan struct{})
+	results := make(chan error, racers)
+	for i := range racers {
+		go func() {
+			id := fmt.Sprintf("01JRACER%04d", i)
+			host := Host{
+				ID:            id,
+				Hostname:      id + ".example",
+				MachineIDHash: "sha256:" + id,
+				Group:         "web-prod",
+				AgentVersion:  "0.0.0-test",
+				EnrolledAt:    time.Now().UTC().Truncate(time.Microsecond),
+			}
+			<-start
+			results <- scoped.CreateEnrolledHost(ctx, host, Certificate{
+				Fingerprint: "fp-race-" + id,
+				HostID:      id,
+				TenantID:    scoped.Tenant(),
+				Serial:      "01",
+				IssuedAt:    time.Now(), NotAfter: time.Now().Add(90 * 24 * time.Hour),
+			})
+		}()
+	}
+	close(start)
+
+	enrolled, refused := 0, 0
+	for range racers {
+		switch err := <-results; {
+		case err == nil:
+			enrolled++
+		case errors.Is(err, ErrHostLimitReached):
+			refused++
+		default:
+			t.Fatalf("enrolling: unexpected error %v", err)
+		}
+	}
+
+	if enrolled != limit || refused != racers-limit {
+		t.Fatalf("with a limit of %d and %d simultaneous enrolments: %d enrolled and %d refused; want %d and %d",
+			limit, racers, enrolled, refused, limit, racers-limit)
+	}
+
+	// The database is the authority on what happened, not the return values: a store that answered nil
+	// and wrote nothing would pass the count above.
+	counts, err := scoped.CountHosts(ctx)
+	if err != nil {
+		t.Fatalf("counting: %v", err)
+	}
+	if counts.Active != limit {
+		t.Fatalf("the fleet holds %d active hosts, over a limit of %d", counts.Active, limit)
+	}
+}
+
+// TestAFleetWithNoLimitTakesEveryHostOfferedToIt asserts the lock added for the limit did not turn a
+// nil limit into a small one.
+//
+// The check and the row lock run on every enrolment, limit or no limit. A bug there — reading NULL as
+// zero, say — would refuse every enrolment on every unlimited fleet, which is every fleet on an
+// ordinary installation.
+func TestAFleetWithNoLimitTakesEveryHostOfferedToIt(t *testing.T) {
+	pg := newPostgres(t)
+	scoped := testTenant(t, pg, "unlimited", ApprovalNone)
+
+	for i := range 5 {
+		enrolTestHost(t, scoped, fmt.Sprintf("01JOPEN%05d", i), "open.example")
+	}
+
+	counts, err := scoped.CountHosts(context.Background())
+	if err != nil {
+		t.Fatalf("counting: %v", err)
+	}
+	if counts.Active != 5 {
+		t.Fatalf("a fleet with no limit holds %d of 5 hosts offered", counts.Active)
+	}
+}
+
+// TestConcurrentTenantEditsDoNotOverwriteEachOther changes two settings at once and asserts both stick.
+//
+// The test for a lost update that review found. `UpdateTenant` used to take a whole `Tenant`, so every
+// caller read the row, changed one field and wrote back all of them — and whichever committed last
+// silently restored the other's stale values. The hosting layer sets a fleet's host limit and its
+// suspension through two separate requests, which made this the shape of a fleet coming back out of
+// suspension because something else touched the row in between.
+//
+// Sequential rather than parallel on purpose: the interleaving that loses an update is read-read-write-
+// write, and doing it by hand is deterministic where two goroutines would be a test that passes on a
+// fast machine.
+func TestConcurrentTenantEditsDoNotOverwriteEachOther(t *testing.T) {
+	pg := newPostgres(t)
+	ctx := context.Background()
+	scoped := testTenant(t, pg, "contended", ApprovalNone)
+
+	// Both editors read the same starting row, as two handlers serving two requests would.
+	before, err := pg.GetTenant(ctx, scoped.Tenant())
+	if err != nil {
+		t.Fatalf("reading the tenant: %v", err)
+	}
+	if before.Suspended || before.HostLimit != nil {
+		t.Fatalf("a new tenant should start unsuspended and unlimited, got %+v", before)
+	}
+
+	// One suspends the fleet. The other, holding the row it read *before* that, sets a host limit.
+	suspended := true
+	if _, err := pg.UpdateTenant(ctx, scoped.Tenant(), TenantPatch{Suspended: &suspended}); err != nil {
+		t.Fatalf("suspending: %v", err)
+	}
+	limit := 3
+	after, err := pg.UpdateTenant(ctx, scoped.Tenant(), TenantPatch{SetHostLimit: true, HostLimit: &limit})
+	if err != nil {
+		t.Fatalf("setting the limit: %v", err)
+	}
+
+	// The second edit must not have carried `suspended = false` back with it.
+	if !after.Suspended {
+		t.Error("setting a host limit put a suspended fleet back into service")
+	}
+	if after.HostLimit == nil || *after.HostLimit != limit {
+		t.Errorf("host limit is %v, want %d", after.HostLimit, limit)
+	}
+
+	// And the row the database holds agrees with what the update returned.
+	stored, err := pg.GetTenant(ctx, scoped.Tenant())
+	if err != nil {
+		t.Fatalf("re-reading: %v", err)
+	}
+	if !stored.Suspended || stored.HostLimit == nil || *stored.HostLimit != limit {
+		t.Errorf("stored tenant is %+v, want suspended with a limit of %d", stored, limit)
+	}
+
+	// Removing the limit is a different request from leaving it alone, which is the whole reason
+	// SetHostLimit exists beside a nil-able HostLimit.
+	cleared, err := pg.UpdateTenant(ctx, scoped.Tenant(), TenantPatch{SetHostLimit: true, HostLimit: nil})
+	if err != nil {
+		t.Fatalf("clearing the limit: %v", err)
+	}
+	if cleared.HostLimit != nil {
+		t.Errorf("host limit is %v after an explicit clear, want nil", cleared.HostLimit)
+	}
+	if !cleared.Suspended {
+		t.Error("clearing the limit also cleared the suspension")
+	}
+
+	// A patch that carries nothing changes nothing.
+	untouched, err := pg.UpdateTenant(ctx, scoped.Tenant(), TenantPatch{})
+	if err != nil {
+		t.Fatalf("empty patch: %v", err)
+	}
+	if !untouched.Suspended || untouched.HostLimit != nil || untouched.DisplayName != before.DisplayName {
+		t.Errorf("an empty patch changed something: %+v", untouched)
 	}
 }

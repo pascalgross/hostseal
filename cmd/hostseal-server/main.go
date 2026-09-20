@@ -479,10 +479,14 @@ func ensureTenant(ctx context.Context, backing store.Store, slug, webhook string
 		// configures one at all. On a hosted installation the flag is left unset and the platform API
 		// is where a tenant's endpoint is set, so an unset flag must not clear what is stored.
 		if webhook != "" && webhook != t.WebhookURL {
-			t.WebhookURL = webhook
-			if err := backing.UpdateTenant(ctx, t); err != nil {
+			// The webhook and nothing else. On a hosted installation this runs at every start while a
+			// platform operator may be editing the same row, and writing back the whole tenant would
+			// undo their change with values this process read at boot.
+			updated, err := backing.UpdateTenant(ctx, t.ID, store.TenantPatch{WebhookURL: &webhook})
+			if err != nil {
 				return store.Tenant{}, fmt.Errorf("recording the tenant's webhook: %w", err)
 			}
+			return updated, nil
 		}
 		return t, nil
 	}
