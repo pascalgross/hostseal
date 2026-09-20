@@ -82,6 +82,15 @@ type enrolmentView struct {
 
 	// APTURL is the repository the agent package is installed from.
 	APTURL string `json:"aptUrl"`
+
+	// WindowsArchiveURL is where the Windows agent is downloaded from.
+	//
+	// A second field rather than a second spelling of the first, because the two platforms are not
+	// served the same way and pretending otherwise is how the Windows agent went undocumented. Debian
+	// and Ubuntu hosts subscribe to a signed repository and get upgrades from it; Windows has no such
+	// channel here, so what a host fetches is one archive from one release and an upgrade is that same
+	// fetch again.
+	WindowsArchiveURL string `json:"windowsArchiveUrl"`
 }
 
 // APTRepositoryURL is where the agent package comes from.
@@ -92,6 +101,21 @@ type enrolmentView struct {
 // An installation serving its own mirror edits the commands it copies; nothing about this page is the
 // place to make that a setting.
 const APTRepositoryURL = "https://hostseal.io/apt"
+
+// WindowsArchiveURL is where the Windows agent's release archive is fetched from.
+//
+// `releases/latest/download/…` rather than a URL naming a version, so the interface does not have to
+// know which release is current and cannot print a link to an older one after the next tag. It is the
+// closest thing Windows has here to what `apt-get install` does for Debian and Ubuntu, and it is
+// deliberately much less: no signed repository, no unattended upgrade, and an operator who must come
+// back for the next one.
+//
+// A constant beside APTRepositoryURL, for the same reason and with the same consequence: it is the
+// address an administrator downloads an agent from, so an installation serving its own copy edits the
+// command rather than a setting. What it must not be is absent — the archive is built by every release
+// and was, for several of them, attached to none of them, which is the failure this names.
+const WindowsArchiveURL = "https://github.com/pascalgross/hostseal/releases/latest/download/" +
+	"hostseal-agent-windows-amd64.zip"
 
 // handleEnrolmentInstructions returns what an operator needs to enrol a host.
 //
@@ -104,6 +128,7 @@ func (s *Server) handleEnrolmentInstructions(w http.ResponseWriter, r *http.Requ
 		CACertificatePath: CACertificatePath,
 		CAFingerprint:     opensslFingerprint(s.cfg.Authority.Certificate()),
 		APTURL:            APTRepositoryURL,
+		WindowsArchiveURL: WindowsArchiveURL,
 	}
 	if view.AgentURL == "" {
 		// The browser's own address, marked as the guess it is. It is right for the ordinary

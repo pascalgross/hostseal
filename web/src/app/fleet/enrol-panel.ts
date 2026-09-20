@@ -52,6 +52,45 @@ function sameOrigin(a: string, b: string): boolean {
 }
 
 /**
+ * Which operating system the commands on this panel are written for.
+ *
+ * Two members and not a list of distributions: every Debian and Ubuntu host installs the agent the same
+ * way, and Windows is the one platform that shares none of it — no repository, a different service
+ * manager, different paths, and a smaller set of intents once it is running.
+ */
+type Platform = 'linux' | 'windows';
+
+/**
+ * Where Install-HostSealAgent.ps1 puts what bounds the agent, and the Windows counterpart of
+ * /etc/hostseal.
+ *
+ * Program Files rather than ProgramData, which is the whole of local policy sovereignty on that
+ * platform: the agent's own service account is granted read and execute here and write nowhere in it,
+ * so the policy file and the trust anchor are not things the agent can rewrite. The panel names the
+ * path rather than deriving one, because a certificate installed anywhere else is a step that appeared
+ * to succeed and changed nothing.
+ */
+const windowsInstallDir = 'C:\\Program Files\\HostSeal';
+
+/**
+ * The CA bundle's path as PowerShell has to be handed it.
+ *
+ * Quoted, because `Program Files` has a space in it and an unquoted path is silently parsed as two
+ * arguments — which fails in the confusing direction, writing a file called `C:\Program` that nothing
+ * reads and reporting nothing wrong.
+ */
+const windowsCAPath = `'${windowsInstallDir}\\server-ca.crt'`;
+
+/**
+ * How to invoke the operator CLI on the host.
+ *
+ * The call operator, for the same reason as the quoting: PowerShell treats a quoted string in command
+ * position as a string to print rather than a program to run, so `'C:\Program Files\…\hostseal.exe'
+ * enroll …` echoes the path and exits 0. That is an enrolment that looked like it worked.
+ */
+const windowsCLI = `& '${windowsInstallDir}\\hostseal.exe'`;
+
+/**
  * How to enrol a host, as three steps somebody can follow without leaving the page.
  *
  * It exists because the fleet page's answer to "how do I add a machine" was one line of shell with the
@@ -104,8 +143,35 @@ export class EnrolPanel {
   /** Which command was copied most recently, so the button can say so. Empty for none. */
   protected readonly copied = signal('');
 
+  /**
+   * Which platform the three steps are shown for.
+   *
+   * Linux first because that is the fleet HostSeal is for, and Windows present at all because the
+   * agent for it shipped, was described nowhere an operator would look, and had no installation
+   * instructions outside a PowerShell file's own comment header. A panel that printed `apt-get` to
+   * somebody holding a Windows Server is not neutral about the question — it answers it wrongly.
+   */
+  protected readonly platform = signal<Platform>('linux');
+
+  /**
+   * Switches the commands to a platform, and forgets which command was copied.
+   *
+   * The tick is forgotten because it is a claim about the text currently on screen. Leaving it up
+   * after a switch tells an operator they have already copied a command they have not seen, and the
+   * one they did copy is for the other operating system.
+   */
+  protected showPlatform(platform: Platform): void {
+    this.platform.set(platform);
+    this.copied.set('');
+  }
+
+  /** The commands that install the agent, for whichever platform is being shown. */
+  protected readonly installCommand = computed(() =>
+    this.platform() === 'windows' ? this.windowsInstallCommand() : this.aptInstallCommand(),
+  );
+
   /** The commands that add the APT repository and install the agent. */
-  protected readonly installCommand = computed(() => {
+  protected readonly aptInstallCommand = computed(() => {
     const apt = this.instructions()?.aptUrl ?? '';
     return [
       `curl -fsSL ${apt}/hostseal-archive-keyring.gpg \\`,
@@ -113,6 +179,42 @@ export class EnrolPanel {
       `curl -fsSL ${apt}/hostseal.sources \\`,
       '  | sudo tee /etc/apt/sources.list.d/hostseal.sources > /dev/null',
       'sudo apt-get update && sudo apt-get install hostseal-agent',
+    ].join('\n');
+  });
+
+  /**
+   * The commands that fetch the Windows archive and run its installer.
+   *
+   * There is no repository to subscribe to, so this is a download and an upgrade is the same download
+   * again. That is a real difference from APT and the panel does not dress it up: nothing on a Windows
+   * host will fetch the next version by itself.
+   *
+   * `curl.exe` with the extension, which is not pedantry. In Windows PowerShell 5.1 — what ships with
+   * every supported Windows Server — `curl` is an alias for `Invoke-WebRequest`, so the bare name runs
+   * a different program whose parameters these arguments do not fit: `-o` is ambiguous between
+   * `-OutFile` and two common parameters, and a request that got past that would still fail on a
+   * server with Internet Explorer Enhanced Security for want of `-UseBasicParsing`. The real curl has
+   * been in System32 since Server 2019, which is this project's floor.
+   *
+   * `Unblock-File` because the archive arrived from the internet and every file unpacked from it
+   * carries the mark of that zone. The default execution policy on Windows Server is RemoteSigned,
+   * which refuses an unsigned script bearing it — with an error naming the execution policy, sending
+   * the administrator to `Set-ExecutionPolicy Bypass` and a machine left weaker than it was found.
+   * Clearing the zone on the files just downloaded is the smaller act and the honest one.
+   *
+   * The installer is run from where the archive was unpacked rather than copied elsewhere first,
+   * because it installs `policy.toml` from beside itself. Run alone it throws on the missing file, and
+   * that is the good failure; the bad one would be an agent with no policy at all.
+   */
+  protected readonly windowsInstallCommand = computed(() => {
+    const archive = this.instructions()?.windowsArchiveUrl ?? '';
+    return [
+      "$zip = Join-Path $env:TEMP 'hostseal-agent-windows-amd64.zip'",
+      "$dir = Join-Path $env:TEMP 'hostseal-agent'",
+      `curl.exe -fsSL ${archive} -o $zip`,
+      'Expand-Archive -Path $zip -DestinationPath $dir -Force',
+      'Get-ChildItem -Path $dir -Recurse | Unblock-File',
+      "& (Join-Path $dir 'Install-HostSealAgent.ps1')",
     ].join('\n');
   });
 
@@ -144,8 +246,17 @@ export class EnrolPanel {
     if (this.caFetchIsUnverifiable()) {
       return this.caCommandUnverified();
     }
+    const url = caUrl(this.pageBase(), details.caCertificatePath);
+    if (this.platform() === 'windows') {
+      // Straight into the installed directory, and that is where the Windows equivalent of `-o root
+      // -g root -m 0644` is: the installer replaced this directory's ACL with an explicit one that
+      // inherits, so a file created here grants the agent's account read and execute and nothing
+      // else. Downloading somewhere else and moving the file afterwards would carry the ACL it had in
+      // %TEMP%, where the agent's account is not named at all.
+      return `curl.exe -fsSL ${url} -o ${windowsCAPath}`;
+    }
     return [
-      `curl -fsSL ${caUrl(this.pageBase(), details.caCertificatePath)} \\`,
+      `curl -fsSL ${url} \\`,
       '  | sudo install -D -o root -g root -m 0644 /dev/stdin /etc/hostseal/server-ca.crt',
     ].join('\n');
   });
@@ -172,14 +283,43 @@ export class EnrolPanel {
    * carries on to enrolment with no certificate installed. Here the two failures stay distinct and
    * `install` keeps its own exit status; `false` rather than `exit` because this gets pasted into an
    * interactive shell, and a mismatch should report itself rather than close the operator's session.
+   *
+   * The PowerShell form is the same check and three of its parts are not interchangeable with the
+   * obvious ones. The digest is computed over the certificate's `RawData` rather than with
+   * `Get-FileHash`, because the value this page shows is openssl's — a SHA-256 of the DER — and
+   * hashing the PEM file's bytes produces a different number that would fail every honest fetch. It
+   * is computed with `SHA256::Create` rather than `GetCertHash('SHA256')`, whose overload arrived in
+   * .NET Framework 4.8 and is therefore absent on a Server 2019 host nobody has updated. And the
+   * certificate is copied into place rather than moved: a move within a volume keeps the permissions
+   * the file had in %TEMP%, where the agent's service account is not named, so the agent would be
+   * left unable to read the authority it verifies the control plane against.
+   *
+   * `throw` where the shell uses `false`, for the reason the shell does not use `exit`: it fails a
+   * script and reports itself at an interactive prompt without closing the session somebody pasted
+   * this into.
    */
   protected readonly caCommandUnverified = computed(() => {
     const details = this.instructions();
     if (!details) {
       return '';
     }
+    const url = caUrl(details.agentUrl, details.caCertificatePath);
+    if (this.platform() === 'windows') {
+      return [
+        "$tmp = Join-Path $env:TEMP 'hostseal-ca.crt'",
+        `curl.exe -fsSLk ${url} -o $tmp`,
+        '$cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2 $tmp',
+        '$sha = [System.Security.Cryptography.SHA256]::Create().ComputeHash($cert.RawData)',
+        "$got = ($sha | ForEach-Object { $_.ToString('X2') }) -join ':'",
+        `if ($got -eq '${details.caFingerprint}') {`,
+        `  Copy-Item -Path $tmp -Destination ${windowsCAPath} -Force`,
+        '} else {',
+        "  throw 'FINGERPRINT MISMATCH - do not install this certificate'",
+        '}',
+      ].join('\n');
+    }
     return [
-      `curl -fsSLk ${caUrl(details.agentUrl, details.caCertificatePath)} -o /tmp/hostseal-ca.crt`,
+      `curl -fsSLk ${url} -o /tmp/hostseal-ca.crt`,
       'if [ "$(openssl x509 -in /tmp/hostseal-ca.crt -noout -fingerprint -sha256)" \\',
       `     = "sha256 Fingerprint=${details.caFingerprint}" ]; then`,
       '  sudo install -D -o root -g root -m 0644 /tmp/hostseal-ca.crt /etc/hostseal/server-ca.crt',
@@ -223,14 +363,33 @@ export class EnrolPanel {
     return !!details && sameOrigin(details.agentUrl, this.pageBase());
   });
 
-  /** The enrolment command, carrying the token when one has been minted. */
+  /**
+   * The enrolment command, carrying the token when one has been minted, and the restart after it.
+   *
+   * The restart is the step that was missing, on both platforms. Installing the agent starts it — the
+   * package does, and so does the Windows installer — so by the time anybody enrols there is already
+   * a service running that found no credential and went into the idle loop. That loop re-reads the
+   * local policy on every tick and never re-reads the enrolment state, so an operator who stopped
+   * after `hostseal enroll` had a host the control plane had heard of exactly once, a service that
+   * was active, and no facts arriving. Nothing about that state says which of the three steps was
+   * incomplete, which is why it belongs in the command rather than in a note under it.
+   */
   protected readonly enrolCommand = computed(() => {
     const details = this.instructions();
     if (!details) {
       return '';
     }
     const token = this.minted()?.token ?? '<TOKEN>';
-    return `sudo hostseal enroll --server ${details.agentUrl} --token ${token}`;
+    if (this.platform() === 'windows') {
+      return [
+        `${windowsCLI} enroll --server ${details.agentUrl} --token ${token}`,
+        'Restart-Service hostseal-agent',
+      ].join('\n');
+    }
+    return [
+      `sudo hostseal enroll --server ${details.agentUrl} --token ${token}`,
+      'sudo systemctl restart hostseal-agent',
+    ].join('\n');
   });
 
   /** Where the CA certificate can be downloaded, for an operator who would rather have the file. */

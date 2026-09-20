@@ -14,12 +14,14 @@ function instructions(partial: Partial<EnrolmentInstructions> = {}): EnrolmentIn
     caCertificatePath: '/api/v1/ca.crt',
     caFingerprint: 'C0:62:73:A0:FD:3C:25:86:BE:F7:7F:0E:08:66:72:C0:F6:E3:AF:3B:A4:94:FB:2A:D9:BF:CC:1D:C5:8E:15:61',
     aptUrl: 'https://hostseal.io/apt',
+    windowsArchiveUrl:
+      'https://github.com/pascalgross/hostseal/releases/latest/download/hostseal-agent-windows-amd64.zip',
     ...partial,
   };
 }
 
 /**
- * The three protected members these specs reach for, named so the casts below stay readable.
+ * The protected members these specs reach for, named so the casts below stay readable.
  *
  * Protected rather than public because they are the template's to call, and a spec that drives the
  * panel the way the markup does has to say so out loud rather than widen the component's surface.
@@ -33,6 +35,9 @@ interface PanelInternals {
 
   /** The page's own address, which the CA command is built against. */
   pageBase(): string;
+
+  /** Switches the commands to a platform, which the two buttons above them do. */
+  showPlatform(platform: 'linux' | 'windows'): void;
 }
 
 /**
@@ -73,6 +78,17 @@ function render(
   panel.pageBase = () => pageBase;
   fixture.detectChanges();
   panel.load();
+  fixture.detectChanges();
+  return fixture;
+}
+
+/** Renders the panel and switches it to Windows, which is what clicking the second button does. */
+function renderWindows(
+  details: EnrolmentInstructions,
+  pageBase = 'https://hostseal.example.org/',
+): ComponentFixture<EnrolPanel> {
+  const fixture = render(details, pageBase);
+  (fixture.componentInstance as unknown as PanelInternals).showPlatform('windows');
   fixture.detectChanges();
   return fixture;
 }
@@ -237,6 +253,86 @@ describe('EnrolPanel', () => {
     expect(command).not.toContain('|| echo "FINGERPRINT MISMATCH');
     expect(command).toContain('if [');
     expect(command).toContain('else');
+  });
+
+  /**
+   * A Windows host gets the commands that work on it, not a translation of the Debian ones.
+   *
+   * The Windows agent shipped and every route to installing it was a Linux command: the panel printed
+   * `apt-get`, the release attached no archive, and INSTALL.md said nothing — so the only instructions
+   * that existed were the comment header of a PowerShell file nobody had a copy of. This asserts the
+   * whole path is here: where the archive comes from, the installer that unpacks it, the CLI under
+   * Program Files, and the service restart.
+   */
+  it('writes PowerShell for a Windows host, and names the archive it comes from', () => {
+    const rendered = text(renderWindows(instructions()).nativeElement);
+
+    expect(rendered).toContain('hostseal-agent-windows-amd64.zip');
+    expect(rendered).toContain('Install-HostSealAgent.ps1');
+    expect(rendered).toContain("& 'C:\\Program Files\\HostSeal\\hostseal.exe' enroll");
+    expect(rendered).toContain('Restart-Service hostseal-agent');
+    expect(rendered).not.toContain('apt-get');
+    expect(rendered).not.toContain('sudo');
+  });
+
+  /**
+   * `curl.exe`, never the bare name, and the downloaded files are unblocked before one is run.
+   *
+   * Both are the difference between a command that works on a fresh Windows Server and one that fails
+   * while looking correct. `curl` is an alias for `Invoke-WebRequest` in Windows PowerShell 5.1, which
+   * reads the arguments differently and needs `-UseBasicParsing` on a host with Internet Explorer
+   * Enhanced Security; and a script unpacked from a downloaded archive carries the internet zone, which
+   * the default RemoteSigned execution policy refuses — with an error that sends people to
+   * `Set-ExecutionPolicy Bypass` and leaves the machine weaker than it was found.
+   */
+  it('uses the real curl and clears the zone before running the installer', () => {
+    const rendered = text(renderWindows(instructions()).nativeElement);
+
+    expect(rendered).toContain('curl.exe -fsSL');
+    expect(rendered).toContain('Unblock-File');
+    expect(rendered).not.toContain('Set-ExecutionPolicy');
+  });
+
+  /**
+   * The Windows fingerprint check hashes the certificate, not the file that carries it.
+   *
+   * The digest on this page is openssl's: a SHA-256 over the DER. `Get-FileHash` on the downloaded PEM
+   * is a different number that never matches, so a check written that way fails every honest fetch —
+   * and the operator's way out of a step that always says MISMATCH is to stop performing it. The copy
+   * matters for a quieter reason: a move would carry the permissions the file had in %TEMP%, where the
+   * agent's service account is not named, leaving it unable to read the authority it verifies against.
+   */
+  it('checks the Windows download against the certificate digest and copies it into place', () => {
+    const rendered = text(
+      renderWindows(instructions({ agentUrl: 'https://hostseal.example.org' }), 'https://hostseal.example.org/')
+        .nativeElement,
+    );
+
+    expect(rendered).toContain('curl.exe -fsSLk');
+    expect(rendered).toContain('$cert.RawData');
+    expect(rendered).toContain("$got -eq 'C0:62:73:A0");
+    expect(rendered).toContain('FINGERPRINT MISMATCH');
+    expect(rendered).toContain("Copy-Item -Path $tmp -Destination 'C:\\Program Files\\HostSeal\\server-ca.crt'");
+    expect(rendered).not.toContain('Get-FileHash');
+    expect(rendered).not.toContain('Move-Item');
+  });
+
+  /**
+   * Enrolment is followed by a restart, on both platforms, in the command rather than in a footnote.
+   *
+   * Installing the agent starts it, so by the time anybody enrols there is a service that found no
+   * credential and went into the idle loop — which re-reads the local policy on every tick and never
+   * re-reads the enrolment state. An operator who stopped after `hostseal enroll` was left with an
+   * active service, a host the control plane had heard of once, and no facts arriving; nothing in that
+   * state names the missing step.
+   */
+  it('restarts the agent after enrolling, on either platform', () => {
+    expect(text(render(instructions()).nativeElement)).toContain(
+      'sudo systemctl restart hostseal-agent',
+    );
+    expect(text(renderWindows(instructions()).nativeElement)).toContain(
+      'Restart-Service hostseal-agent',
+    );
   });
 
   /**

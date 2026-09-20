@@ -175,10 +175,11 @@ cannot exist on Windows at all: there is no installable security-only subset of 
 The guarantee above is unchanged and unqualified — it says *any enrolled host* and names no operating
 system. Where a platform cannot carry a mechanism at the strength Linux carries it, HostSeal does less
 there. [`docs/SECURITY.md` §12](docs/SECURITY.md#12-windows-hosts) works that out in full.
-Install with `packaging/windows/Install-HostSealAgent.ps1`, which is the only PowerShell in HostSeal and
-runs once, from an administrator's session, before there is an agent to constrain — the agent itself
-invokes no interpreter, and `powershell.exe` is in the deny-lists that `internal/run` and
-`internal/intent` both check.
+Installing is [`docs/INSTALL.md`](docs/INSTALL.md#windows-server): there is no repository for Windows,
+so the agent is one archive attached to each release and the installer in it is
+`Install-HostSealAgent.ps1` — the only PowerShell in HostSeal, running once from an administrator's
+session before there is an agent to constrain. The agent itself invokes no interpreter, and
+`powershell.exe` is in the deny-lists that `internal/run` and `internal/intent` both check.
 
 ## Documentation
 

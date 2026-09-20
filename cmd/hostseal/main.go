@@ -144,7 +144,7 @@ func enroll(argv []string) int {
 	}
 
 	fmt.Printf("Enrolled as %s with %s.\n", state.HostID, state.ServerURL)
-	fmt.Println("Start the agent with: systemctl start hostseal-agent")
+	fmt.Printf("Restart the agent so it reads this: %s\n", agent.RestartCommand)
 	return 0
 }
 

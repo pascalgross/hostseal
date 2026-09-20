@@ -23,3 +23,16 @@ const DefaultServerCABundle = "/etc/hostseal/server-ca.crt"
 
 // MachineIDPath is systemd's machine identifier, which is documented as confidential.
 const MachineIDPath = "/etc/machine-id"
+
+// RestartCommand is what an operator runs to make a freshly enrolled host act on its enrolment.
+//
+// A restart rather than a start, and that is the whole reason this is printed at all: the package
+// starts the service at install time, so by the time anybody enrols there is already an agent running —
+// one that found no credential, said so, and went into the idle loop in cmd/hostseal-agent. That loop
+// re-reads the policy on every tick and never re-reads the enrolment state, so an operator who enrols
+// and stops there has a running service, a host the control plane has heard of once, and no facts
+// arriving. "Start" invited exactly that: it succeeds, changes nothing, and reports success.
+//
+// A constant per platform because `hostseal enroll` ships on both and the Windows service is not
+// managed by systemd, so the Linux command printed on a Windows host is advice that cannot be followed.
+const RestartCommand = "systemctl restart hostseal-agent"

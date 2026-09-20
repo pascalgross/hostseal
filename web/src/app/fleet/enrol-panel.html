@@ -21,6 +21,22 @@
         control plane has no path to one, before enrolment or after it.
       </p>
 
+      <div class="mb-4 flex flex-wrap items-center gap-2">
+        <span class="text-sm opacity-70">This host runs</span>
+        <button mat-stroked-button type="button"
+                [class]="platform() === 'linux' ? 'font-medium bg-black/10 dark:bg-white/15' : 'opacity-70'"
+                [attr.aria-pressed]="platform() === 'linux'"
+                (click)="showPlatform('linux')">
+          Ubuntu or Debian
+        </button>
+        <button mat-stroked-button type="button"
+                [class]="platform() === 'windows' ? 'font-medium bg-black/10 dark:bg-white/15' : 'opacity-70'"
+                [attr.aria-pressed]="platform() === 'windows'"
+                (click)="showPlatform('windows')">
+          Windows Server
+        </button>
+      </div>
+
       @if (instructions()!.agentUrlIsAGuess) {
         <div class="mb-4 p-3 rounded bg-hostseal-warn/15 flex items-start gap-3 text-sm">
           <mat-icon class="text-hostseal-warn" aria-hidden="true">info_outline</mat-icon>
@@ -37,11 +53,21 @@
       <ol class="m-0 pl-0 list-none flex flex-col gap-6">
         <li class="flex flex-col gap-2">
           <h3 class="m-0 text-base font-medium">1. Install the agent</h3>
-          <p class="m-0 text-sm opacity-80">
-            The repository is signed with a key held only by the release workflow, and the agent
-            installs with no trusted signers and a policy that permits security updates and nothing
-            else.
-          </p>
+          @if (platform() === 'windows') {
+            <p class="m-0 text-sm opacity-80">
+              In an elevated PowerShell session. There is no repository for Windows, so this is a
+              download and the next version is the same three commands again — which keep the policy
+              file and the trust anchor exactly as you left them. The agent installs with no trusted
+              signers, and a Windows host executes read-only intents only: inventory, services,
+              pending updates and reboot state. It applies no updates and reboots nothing.
+            </p>
+          } @else {
+            <p class="m-0 text-sm opacity-80">
+              The repository is signed with a key held only by the release workflow, and the agent
+              installs with no trusted signers and a policy that permits security updates and nothing
+              else.
+            </p>
+          }
           <pre class="m-0 p-3 rounded bg-black/5 dark:bg-white/10 text-sm overflow-x-auto"><code>{{ installCommand() }}</code></pre>
           <button mat-stroked-button type="button" class="self-start"
                   (click)="copy('install', installCommand())">
@@ -61,7 +87,7 @@
             <p class="m-0 text-sm opacity-80">
               This control plane serves its own certificate, so the host cannot verify the connection it
               would fetch that certificate over — the file being fetched is what would establish the
-              trust. A plain <code>curl</code> fails here with
+              trust. A plain <code>{{ platform() === 'windows' ? 'curl.exe' : 'curl' }}</code> fails here with
               <code>unable to get local issuer certificate</code>, and that is it being right rather than
               broken. So the certificate is fetched unverified and checked against the fingerprint below,
               which reached you over this session instead. It installs on a match and refuses otherwise.
@@ -88,6 +114,12 @@
           <p class="m-0 text-sm opacity-80">
             A token authorises exactly one enrolment and expires. Only its hash is stored, so it is
             shown once here and cannot be recovered afterwards — minting another costs one click.
+          </p>
+          <p class="m-0 text-sm opacity-80">
+            The restart is part of the step. Installing the agent started it, so it is already running
+            — it found no credential, said so, and settled into reporting local state on a timer. It
+            does not look again on its own, and a host in that state is active, known to the control
+            plane from its enrolment, and sending nothing.
           </p>
 
           @if (minted(); as token) {

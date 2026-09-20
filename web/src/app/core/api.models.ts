@@ -1126,6 +1126,16 @@ export interface EnrolmentInstructions {
 
   /** The APT repository the agent package is installed from. */
   aptUrl: string;
+
+  /**
+   * Where the Windows agent's release archive is downloaded from.
+   *
+   * Separate from `aptUrl` because the two platforms are not served the same way. A Debian or Ubuntu
+   * host subscribes to a signed repository and is upgraded from it; a Windows host fetches one archive
+   * and is upgraded by fetching it again. Collapsing the two into one field would have the panel print
+   * a repository URL to a platform that has none.
+   */
+  windowsArchiveUrl: string;
 }
 
 /**
