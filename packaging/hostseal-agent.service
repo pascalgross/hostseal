@@ -36,6 +36,12 @@ NoNewPrivileges=yes
 CapabilityBoundingSet=
 AmbientCapabilities=
 
+# ProtectHome= and PrivateTmp= give this unit a mount namespace in which /home, /root and /tmp are empty
+# filesystems, whatever the host has underneath. That is worth having and it does make the resources
+# collector blind to a separate /home partition — so the collector names those three paths in its report
+# rather than reporting a host that has no such disk, which is the same "plausible number rather than an
+# error" failure the block below is about. Widening the sandbox to see them would trade a stated gap for
+# an unstated risk; the gap is the better half of that trade, and it is stated.
 ProtectSystem=strict
 ProtectHome=yes
 PrivateTmp=yes
@@ -66,7 +72,8 @@ SystemCallFilter=~@privileged @resources
 # AF_UNIX is required to reach the systemd D-Bus interface, which is how unit state is read — systemctl
 # has no machine-readable output mode. AF_NETLINK is required by net.Interfaces() on Linux: without it,
 # network fact collection returns nothing and does so quietly, which is exactly the class of failure
-# this project tries not to ship.
+# this project tries not to ship. Per-interface traffic counters are deliberately read from /proc/net/dev
+# instead, so the one section that would otherwise need netlink twice needs it once.
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
 
 ReadWritePaths=/var/lib/hostseal /var/log/hostseal

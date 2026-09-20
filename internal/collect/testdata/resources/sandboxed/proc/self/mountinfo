@@ -1,0 +1,5 @@
+25 30 0:24 / /proc rw,nosuid,nodev,noexec,relatime shared:5 - proc proc rw
+30 1 252:1 / / rw,relatime shared:1 - ext4 /dev/vda1 rw,errors=remount-ro
+40 30 0:41 / /home ro,nosuid,nodev,noexec - ramfs ramfs ro,mode=755
+41 30 0:42 / /root ro,nosuid,nodev,noexec - ramfs ramfs ro,mode=755
+42 30 0:43 / /tmp rw,nosuid,nodev - tmpfs tmpfs rw,size=1024k

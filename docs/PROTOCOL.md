@@ -268,7 +268,27 @@ so an agent and a server that agree on the encoding agree on the digest.
     }],
     "servicesTruncated": false,
     "extra": {
-      "network": { "interfaces": [{ "name": "eth0", "mtu": 1500, "up": true }] },
+      "network": { "interfaces": [{
+        "name": "eth0", "hardwareAddress": "52:54:00:12:34:56", "mtu": 1500, "up": true,
+        "addresses": ["10.0.0.11/24", "fe80::5054:ff:fe12:3456/64"]
+      }] },
+      "resources": {
+        "cpu": { "cores": 4, "loadPerCorePercent": 25 },
+        "memory": {
+          "totalBytes": 8363876352, "usedPercent": 50,
+          "swapTotalBytes": 2147483648, "swapUsedPercent": 25
+        },
+        "filesystems": [{
+          "device": "/dev/vda1", "mountPoint": "/", "type": "ext4",
+          "sizeBytes": 214748364800, "usedPercent": 76, "inodesUsedPercent": 12
+        }],
+        "filesystemsTotal": 1,
+        "interfaces": [{
+          "name": "eth0", "receivedGiB": 412, "transmittedGiB": 90,
+          "receiveErrors": 0, "receiveDrops": 7, "transmitErrors": 0, "transmitDrops": 0
+        }],
+        "scanComplete": true
+      },
       "containers": {
         "containers": [{
           "id": "a1b2c3…", "shortId": "a1b2c3d4e5f6", "mainPid": 4242, "command": "nginx",
@@ -303,7 +323,25 @@ collection or an agent predating this field; a client that needs to tell those a
 version in the same heartbeat.
 
 `extra` holds the output of registered collectors, keyed by collector name. It is where a fact added
-through the `collect.Collector` seam appears; see [`EXTENDING.md`](EXTENDING.md).
+through the `collect.Collector` seam appears; see [`EXTENDING.md`](EXTENDING.md). Every section in it is
+refusable by the host's own policy and is **absent** rather than empty when refused, so a client reading
+the policy in the same heartbeat can always say "this host does not report that" rather than "this host
+has none".
+
+The interface list in `extra.network` is capped, and the cut is **not** alphabetical. Interfaces the
+kernel drives a real device for come first, then ones with an address — a bond, a bridge, a VLAN — then
+everything else. Without that, a container host with fifty `veth*` interfaces and one `wlp2s0` would keep
+the veths and drop the wireless card, losing the one hardware address that identifies the machine to
+anything outside HostSeal. The reported list is sorted by name whatever survived, so the ranking decides
+what is sent and never what a client has to parse.
+
+`extra.network` is present unless a host has written `policy.network.report = false`. It ships on, and
+the default is the one place in this document where "on" is not an argument about disclosure: the section
+has been in every release, so a default of false would remove a fact from every existing fleet on the day
+its agents were upgraded. The key exists because `hardwareAddress` does — a MAC address is a durable
+identifier that outlives a reinstallation and is the join key to a DHCP lease, a switch port and a
+hypervisor's inventory, which is precisely what makes it useful and what a host may decline to put in a
+control plane it does not own.
 
 `extra.containers` is present only on a host whose `policy.containers.report` is `true`, and the policy
 in the same heartbeat is what lets a client say "this host does not report containers" rather than
@@ -319,6 +357,79 @@ health status are daemon state behind a socket the agent deliberately cannot rea
 rather than empty, and `command` is the executable name from `/proc/<pid>/comm` rather than a command
 line, which is where credentials end up. `startedAt` is the *process* start, so it resets when a
 container restarts and is not the container's creation time.
+
+`extra.resources` is capacity and how much of it is gone, and it is present unless a host has written
+`policy.resources.report = false`. It ships **on**, unlike `extra.containers`, and the difference is the
+one `[updates] scan` already draws: what a business runs on a host is a disclosure that host has not
+agreed to make, while a disk at ninety-eight per cent is the fleet health somebody installed the agent to
+see. As with containers, the policy travels in the same heartbeat, so a client can say "this host does
+not report capacity" rather than "this host has no disks".
+
+**Every utilisation figure in it is banded, and clients MUST NOT present it as exact.** Load and memory
+are rounded **down** to five percentage points, filesystem and inode use to one, and interface byte counters
+to whole gibibytes. That is what keeps [§4.1](#41-digest-first) working on a section that is otherwise
+never twice the same: an unchanged host produces an unchanged digest and keeps sending one. Rounding is
+downward on purpose, so a reported figure is never higher than the truth — an operator acting on "90%
+full" finds at most ninety-four per cent gone. Note that `df` rounds the same quantity *up*, so a
+filesystem `df` calls 22% full reports 21 here; the denominator is df's, the direction is not. The byte counters are monotonic since boot, so a control
+plane that wants a rate differences two reports; the agent computes none, keeps no state between
+heartbeats, and this is a low-frequency snapshot rather than a time series.
+
+The four error and drop counters are the **exception** and are reported exactly, so an interface whose
+counters are moving puts its host into a full report on every heartbeat. That is deliberate: the value of
+those numbers is almost entirely in whether they are moving at all, which a band would answer by
+deleting — and an interface dropping packets is one whose full report is worth the bytes. It is worth
+knowing which way it costs, because `rx_dropped` counts frames discarded for reasons that include
+ordinary unwanted multicast, so a perfectly healthy host on a broadcast LAN can send full reports
+indefinitely. That is a reason to set `policy.resources.report = false` on a metered link.
+
+`cpu.loadPerCorePercent` is the **fifteen-minute load average** as a percentage of the processor count, not
+CPU-time utilisation, and a client MUST NOT label it as the latter. A load average counts tasks in
+uninterruptible sleep as well as runnable ones, so a host blocked on a failing disk reads high here while
+its processors idle — which is the same conclusion at fleet scale and a different one to anybody
+comparing against `top`. Fifteen minutes rather than one because the heartbeat is a minute apart: the
+one-minute figure is very nearly an independent sample on each beat, which no band can hold still, and
+the question a fleet asks is about sustained load rather than a ninety-second spike.
+
+Three things inside it are absent rather than zero, and the distinction MUST survive rendering.
+`memory.usedPercent` is absent on a kernel that publishes no `MemAvailable`; `memory.swapUsedPercent` is
+absent on a host with no swap, which is not the same claim as nothing being swapped; and
+`filesystems[].inodesUsedPercent` is absent on btrfs and xfs, which allocate inodes dynamically and
+cannot run out of them, which is not the same claim as none being used. A filesystem `statfs` refused —
+an unreachable NFS server is the usual cause — is missing from the list entirely rather than present with
+zeroes.
+
+The list is what a disk report can act on rather than everything mounted: pseudo filesystems, `tmpfs`,
+read-only mounts and snap's `squashfs` images are excluded because none of them can fill up, and a disk
+mounted in several places is counted once.
+
+**Remote and userspace filesystems — `nfs`, `cifs`, `ceph`, anything `fuse.*` — are excluded for a
+different reason, and it is a hard requirement on any implementation of this section rather than a
+preference.** `statfs(2)` against a hard-mounted share whose server has gone away blocks in
+uninterruptible sleep, where no context, timeout or signal reaches it; an agent that probes one inside
+its heartbeat stops heartbeating for good, and the host disappears from the fleet. An agent MUST NOT
+issue a blocking capacity call it cannot abandon, and abandoning it in a goroutine is not a fix — the
+thread stays blocked and one more leaks on every beat. Skipped mount points are named in `note`, because
+a host whose `/srv` is on NFS would otherwise report no `/srv` at all, which reads as a host that has
+none.
+
+`filesystemsUnmeasured` names mount points that were found and could not be measured — a mount point
+under a directory this unprivileged agent cannot traverse is the usual cause. It is the third answer
+between two wrong ones: a row of zeroes would read as a disk with nothing on it, and a silently missing
+row reads as a host that never had the disk. `scanComplete` is `false` whenever it is present, so a
+client acting on that one boolean is never told the list is complete when it is not. A mount point
+appears there only when *no* mount of its device could be measured, so a disk whose size is reported
+through one path is never also named as unmeasurable through another. One exclusion is the agent's own doing and is stated rather
+than left to be noticed: `ProtectHome=` and `PrivateTmp=` in the agent's systemd unit replace `/home`,
+`/root` and `/tmp` with empty filesystems inside its mount namespace, so a host whose `/home` is a
+separate partition has one this section cannot see. The agent names those paths in `note` instead — `/var/tmp`
+too, which `PrivateTmp=` replaces along with `/tmp`.
+
+What is *not* excluded is worth stating, because getting it wrong empties the section on every host.
+`ProtectSystem=strict` bind-remounts the whole hierarchy read-only inside that same namespace, which sets
+`ro` in mountinfo's per-mount options while the superblock still reads `rw`. Read-only filesystems are
+therefore judged by the **superblock**: a disk this process merely cannot write is not a disk that cannot
+fill up.
 
 `signers` carries key identities and algorithms only — never keys, and never the file. The control
 plane has no business holding a copy of a host's trust anchor, and rendering "ops-yubikey-1 (PKCS#11)"
@@ -395,6 +506,9 @@ When `|clockOffsetSeconds| > 300`:
 | Upgradable packages listed | 500 |
 | `rebootRequiredBy` entries | 100 |
 | Containers reported | 200 |
+| Network interfaces reported | 50 |
+| Addresses reported per interface | 10 |
+| Filesystems reported | 50 |
 
 Servers MUST reject over-size bodies with `413`. Agents MUST truncate rather than emit an over-size
 body, and MUST set a `truncated` flag on the affected section. In multi-tenant hosting, one host

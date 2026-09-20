@@ -357,6 +357,19 @@ func policyView(p policy.Policy) map[string]any {
 		"containers": map[string]any{
 			"report": p.Containers.Report,
 		},
+		// Here for the same reason, and with one more of its own: this gate ships on, so its interesting
+		// value is the false one. A host that has switched capacity reporting off would otherwise be
+		// indistinguishable from one whose agent is too old to have the section at all, and the two want
+		// different responses from whoever is looking for the disk that is filling up.
+		"resources": map[string]any{
+			"report": p.Resources.Report,
+		},
+		// And this one, whose absence a client cannot infer from anything else: a host that has switched
+		// network reporting off looks exactly like one whose netlink access was taken away, and the two
+		// want different responses.
+		"network": map[string]any{
+			"report": p.Network.Report,
+		},
 		"limits": map[string]any{
 			"maxJobAgeSeconds": p.Limits.MaxJobAgeSeconds,
 		},

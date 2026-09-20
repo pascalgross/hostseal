@@ -1,0 +1,6 @@
+25 30 0:24 / /proc rw,nosuid,nodev,noexec,relatime shared:5 - proc proc rw
+30 1 252:1 / / rw,relatime shared:1 - ext4 /dev/vda1 rw,errors=remount-ro
+50 30 0:52 / /srv/shared rw,relatime shared:22 - nfs4 fileserver:/export/shared rw,vers=4.2,hard
+51 30 0:53 / /mnt/windows rw,relatime shared:24 - cifs //winbox/share rw
+52 30 0:54 / /mnt/remote-home rw,nosuid,nodev,relatime shared:26 - fuse.sshfs ops@jump:/home rw,user_id=1000
+53 30 0:55 / /mnt/ntfs rw,relatime shared:28 - fuse.ntfs-3g /dev/sdb1 rw
