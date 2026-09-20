@@ -205,16 +205,34 @@ export class EnrolPanel {
    * The installer is run from where the archive was unpacked rather than copied elsewhere first,
    * because it installs `policy.toml` from beside itself. Run alone it throws on the missing file, and
    * that is the good failure; the bad one would be an agent with no policy at all.
+   *
+   * The whole sequence is one `& { … }` block, and that is what makes a failure stop it. Pasted line
+   * by line at a prompt, each line is its own statement: a download that fails leaves the next command
+   * running anyway, and because the staging paths are fixed, the run before this one may have left an
+   * archive and an unpacked tree there. The installer would then be started from stale files, stop the
+   * service, copy last month's binaries over this month's and report a successful upgrade. Inside a
+   * block, `throw` abandons the rest; `$ErrorActionPreference` is set in that block's own scope, so a
+   * cmdlet that fails is terminating here and the operator's session is not left altered afterwards.
+   *
+   * `$LASTEXITCODE` is checked by hand because `curl.exe` is a native program: no preference variable
+   * covers it, and `-f` makes curl *return* failure rather than raise one. The staging paths are
+   * cleared first for the same reason — curl truncates its output file before it knows the response
+   * status, and the `--remove-on-error` that would clean that up is newer than the curl on Server 2019.
    */
   protected readonly windowsInstallCommand = computed(() => {
     const archive = this.instructions()?.windowsArchiveUrl ?? '';
     return [
-      "$zip = Join-Path $env:TEMP 'hostseal-agent-windows-amd64.zip'",
-      "$dir = Join-Path $env:TEMP 'hostseal-agent'",
-      `curl.exe -fsSL ${archive} -o $zip`,
-      'Expand-Archive -Path $zip -DestinationPath $dir -Force',
-      'Get-ChildItem -Path $dir -Recurse | Unblock-File',
-      "& (Join-Path $dir 'Install-HostSealAgent.ps1')",
+      '& {',
+      "  $ErrorActionPreference = 'Stop'",
+      "  $zip = Join-Path $env:TEMP 'hostseal-agent-windows-amd64.zip'",
+      "  $dir = Join-Path $env:TEMP 'hostseal-agent'",
+      '  Remove-Item -Path $zip, $dir -Recurse -Force -ErrorAction SilentlyContinue',
+      `  curl.exe -fsSL ${archive} -o $zip`,
+      "  if ($LASTEXITCODE -ne 0) { throw 'the download failed; nothing has been installed' }",
+      '  Expand-Archive -Path $zip -DestinationPath $dir',
+      '  Get-ChildItem -Path $dir -Recurse | Unblock-File',
+      "  & (Join-Path $dir 'Install-HostSealAgent.ps1')",
+      '}',
     ].join('\n');
   });
 
@@ -248,12 +266,25 @@ export class EnrolPanel {
     }
     const url = caUrl(this.pageBase(), details.caCertificatePath);
     if (this.platform() === 'windows') {
-      // Straight into the installed directory, and that is where the Windows equivalent of `-o root
-      // -g root -m 0644` is: the installer replaced this directory's ACL with an explicit one that
-      // inherits, so a file created here grants the agent's account read and execute and nothing
-      // else. Downloading somewhere else and moving the file afterwards would carry the ACL it had in
-      // %TEMP%, where the agent's account is not named at all.
-      return `curl.exe -fsSL ${url} -o ${windowsCAPath}`;
+      // Fetched to a temporary file and copied in on success, rather than written straight to the
+      // trust anchor's path. `-f` makes curl return failure rather than raise it, and curl truncates
+      // its output file before it knows the response status — so the direct form can leave an empty
+      // server-ca.crt behind on a 404. `hostseal enroll` reads that path when it exists, so enrolment
+      // would then fail to verify a control plane that was never the problem.
+      //
+      // A copy rather than a move, and that is where the Windows equivalent of `-o root -g root -m
+      // 0644` is: the installer replaced this directory's ACL with an explicit one that inherits, so
+      // a file created here grants the agent's account read and execute and nothing else, while a
+      // moved file would keep the permissions it had in %TEMP%, where that account is not named.
+      return [
+        '& {',
+        "  $ErrorActionPreference = 'Stop'",
+        "  $tmp = Join-Path $env:TEMP 'hostseal-ca.crt'",
+        `  curl.exe -fsSL ${url} -o $tmp`,
+        "  if ($LASTEXITCODE -ne 0) { throw 'the certificate could not be fetched; nothing was installed' }",
+        `  Copy-Item -Path $tmp -Destination ${windowsCAPath} -Force`,
+        '}',
+      ].join('\n');
     }
     return [
       `curl -fsSL ${url} \\`,
@@ -296,7 +327,15 @@ export class EnrolPanel {
    *
    * `throw` where the shell uses `false`, for the reason the shell does not use `exit`: it fails a
    * script and reports itself at an interactive prompt without closing the session somebody pasted
-   * this into.
+   * this into. It is inside a `& { … }` block because that is the only thing that makes it stop
+   * anything — pasted as loose lines, a `throw` ends one statement and the next runs regardless.
+   *
+   * That block is also what keeps the two failures apart, which is the same property the shell form
+   * is written for. Without it a failed fetch leaves `$cert` unset, the digest empty and the
+   * comparison false, so the step reports a fingerprint mismatch — an attack that did not happen —
+   * for a control plane that was merely unreachable. The exit status of the fetch is therefore
+   * checked before anything is compared, and a mismatch is a guard clause rather than the `else` of
+   * the copy, so a copy that fails keeps its own error too.
    */
   protected readonly caCommandUnverified = computed(() => {
     const details = this.instructions();
@@ -306,15 +345,18 @@ export class EnrolPanel {
     const url = caUrl(details.agentUrl, details.caCertificatePath);
     if (this.platform() === 'windows') {
       return [
-        "$tmp = Join-Path $env:TEMP 'hostseal-ca.crt'",
-        `curl.exe -fsSLk ${url} -o $tmp`,
-        '$cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2 $tmp',
-        '$sha = [System.Security.Cryptography.SHA256]::Create().ComputeHash($cert.RawData)',
-        "$got = ($sha | ForEach-Object { $_.ToString('X2') }) -join ':'",
-        `if ($got -eq '${details.caFingerprint}') {`,
+        '& {',
+        "  $ErrorActionPreference = 'Stop'",
+        "  $tmp = Join-Path $env:TEMP 'hostseal-ca.crt'",
+        `  curl.exe -fsSLk ${url} -o $tmp`,
+        "  if ($LASTEXITCODE -ne 0) { throw 'the certificate could not be fetched; nothing was installed' }",
+        '  $cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2 $tmp',
+        '  $sha = [System.Security.Cryptography.SHA256]::Create().ComputeHash($cert.RawData)',
+        "  $got = ($sha | ForEach-Object { $_.ToString('X2') }) -join ':'",
+        `  if ($got -ne '${details.caFingerprint}') {`,
+        "    throw 'FINGERPRINT MISMATCH - do not install this certificate'",
+        '  }',
         `  Copy-Item -Path $tmp -Destination ${windowsCAPath} -Force`,
-        '} else {',
-        "  throw 'FINGERPRINT MISMATCH - do not install this certificate'",
         '}',
       ].join('\n');
     }
@@ -373,6 +415,11 @@ export class EnrolPanel {
    * after `hostseal enroll` had a host the control plane had heard of exactly once, a service that
    * was active, and no facts arriving. Nothing about that state says which of the three steps was
    * incomplete, which is why it belongs in the command rather than in a note under it.
+   *
+   * These two lines need no `& { … }` guard, unlike the steps above them. A failed enrolment is loud
+   * — it prints why and exits non-zero — and restarting an agent that is still unenrolled changes
+   * nothing: it idles again, exactly as it was. There is no stale state for a second command to act
+   * on and nothing that could look like success.
    */
   protected readonly enrolCommand = computed(() => {
     const details = this.instructions();

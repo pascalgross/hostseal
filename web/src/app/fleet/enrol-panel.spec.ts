@@ -310,11 +310,44 @@ describe('EnrolPanel', () => {
 
     expect(rendered).toContain('curl.exe -fsSLk');
     expect(rendered).toContain('$cert.RawData');
-    expect(rendered).toContain("$got -eq 'C0:62:73:A0");
+    expect(rendered).toContain("$got -ne 'C0:62:73:A0");
     expect(rendered).toContain('FINGERPRINT MISMATCH');
     expect(rendered).toContain("Copy-Item -Path $tmp -Destination 'C:\\Program Files\\HostSeal\\server-ca.crt'");
     expect(rendered).not.toContain('Get-FileHash');
     expect(rendered).not.toContain('Move-Item');
+  });
+
+  /**
+   * Every Windows step stops at its first failure, which loose PowerShell lines do not.
+   *
+   * Pasted at a prompt, each line is its own statement: a download that fails leaves the next command
+   * running, and the staging paths are fixed, so a previous run's archive may still be sitting there.
+   * The installer would start from stale files and report an upgrade it did not perform. The same
+   * shape is worse in the certificate step — a fetch that failed leaves the digest empty, the
+   * comparison false, and the operator looking at MISMATCH, which names an attack for a control plane
+   * that was merely unreachable.
+   *
+   * `& { … }` is what gives `throw` something to abandon, `$ErrorActionPreference` inside it makes a
+   * failing cmdlet terminating without altering the session afterwards, and `$LASTEXITCODE` is
+   * checked by hand because no preference variable covers a native program.
+   */
+  it('stops each Windows step at the first failure rather than carrying on', () => {
+    const install = text(renderWindows(instructions()).nativeElement);
+
+    expect(install).toContain('& { $ErrorActionPreference');
+    expect(install).toContain('$LASTEXITCODE -ne 0');
+    expect(install).toContain('Remove-Item -Path $zip, $dir');
+
+    const unverified = text(
+      renderWindows(instructions({ agentUrl: 'https://hostseal.example.org' }), 'https://hostseal.example.org/')
+        .nativeElement,
+    );
+
+    // The fetch is checked before anything is compared, so an unreachable control plane cannot be
+    // reported as a fingerprint mismatch.
+    expect(unverified.indexOf('$LASTEXITCODE -ne 0')).toBeLessThan(
+      unverified.indexOf('FINGERPRINT MISMATCH'),
+    );
   });
 
   /**

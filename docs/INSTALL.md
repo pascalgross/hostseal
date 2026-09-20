@@ -440,21 +440,50 @@ both check. Everything below runs in an **elevated** session.
 
 ```powershell
 # 1. Fetch the archive and run the installer.
-$zip = Join-Path $env:TEMP 'hostseal-agent-windows-amd64.zip'
-$dir = Join-Path $env:TEMP 'hostseal-agent'
-curl.exe -fsSL https://github.com/pascalgross/hostseal/releases/latest/download/hostseal-agent-windows-amd64.zip -o $zip
-Expand-Archive -Path $zip -DestinationPath $dir -Force
-Get-ChildItem -Path $dir -Recurse | Unblock-File
-& (Join-Path $dir 'Install-HostSealAgent.ps1')
+& {
+  $ErrorActionPreference = 'Stop'
+  $zip = Join-Path $env:TEMP 'hostseal-agent-windows-amd64.zip'
+  $dir = Join-Path $env:TEMP 'hostseal-agent'
+  Remove-Item -Path $zip, $dir -Recurse -Force -ErrorAction SilentlyContinue
+  curl.exe -fsSL https://github.com/pascalgross/hostseal/releases/latest/download/hostseal-agent-windows-amd64.zip -o $zip
+  if ($LASTEXITCODE -ne 0) { throw 'the download failed; nothing has been installed' }
+  Expand-Archive -Path $zip -DestinationPath $dir
+  Get-ChildItem -Path $dir -Recurse | Unblock-File
+  & (Join-Path $dir 'Install-HostSealAgent.ps1')
+}
 
 # 2. Trust this control plane's authority, before enrolling rather than after — the same ordering,
 #    and the same failure when it is done the other way round.
-curl.exe -fsSL https://hostseal.example.org/api/v1/ca.crt -o 'C:\Program Files\HostSeal\server-ca.crt'
+& {
+  $ErrorActionPreference = 'Stop'
+  $tmp = Join-Path $env:TEMP 'hostseal-ca.crt'
+  curl.exe -fsSL https://hostseal.example.org/api/v1/ca.crt -o $tmp
+  if ($LASTEXITCODE -ne 0) { throw 'the certificate could not be fetched; nothing was installed' }
+  Copy-Item -Path $tmp -Destination 'C:\Program Files\HostSeal\server-ca.crt' -Force
+}
 
 # 3. Enrol, and restart so the running service reads it.
 & 'C:\Program Files\HostSeal\hostseal.exe' enroll --server https://hostseal.example.org --token hsl_…
 Restart-Service hostseal-agent
 ```
+
+Each step is one `& { … }` block because that is what makes a failure stop it. Pasted as loose lines,
+every line is its own statement: a download that fails leaves the next command running, and the staging
+paths are fixed, so the run before this one may have left an archive and an unpacked tree in `%TEMP%`.
+The installer would then start from stale files, stop the service, copy older binaries over newer ones
+and report a successful upgrade. Inside a block, `throw` abandons the rest, and
+`$ErrorActionPreference` set there belongs to that block's scope, so a failing cmdlet is terminating
+without the session being left altered afterwards. `$LASTEXITCODE` is checked by hand because no
+preference variable covers a native program, and `-f` makes curl *return* failure rather than raise it.
+
+Step 2 fetches to a temporary file and copies it in, rather than writing straight to the trust anchor's
+path, for the same reason: curl truncates its output file before it knows the response status — and
+`--remove-on-error`, which would clean that up, is newer than the curl on Server 2019 — so the direct
+form can leave an empty `server-ca.crt` behind on a 404. `hostseal enroll` reads that path when it
+exists, so enrolment would then fail to verify a control plane that was never the problem.
+
+Step 3 needs no such block. A failed enrolment is loud, and restarting an agent that is still unenrolled
+changes nothing: it idles again, exactly as it was.
 
 `curl.exe` with the extension, and that is not pedantry: in Windows PowerShell 5.1 — what ships with
 every supported Windows Server — `curl` is an alias for `Invoke-WebRequest`, whose parameters these
@@ -471,9 +500,10 @@ itself.
 
 There is no `chown` or `chmod` in step 2 and nothing is missing. The installer replaces the ACL on
 `C:\Program Files\HostSeal` with an explicit one that inherits, granting the agent's service account
-read and execute and nothing else — so a file created there is already right, and one downloaded
-elsewhere and *moved* in would keep the permissions it had in `%TEMP%`, where that account is not named
-at all. Copy or download directly; do not move.
+read and execute and nothing else, so a file created there is already right. That is also why the last
+line is `Copy-Item` and not `Move-Item`: a copy creates a new file, which inherits that ACL, while a
+move within a volume keeps the permissions the file had in `%TEMP%`, where the agent's account is not
+named at all — leaving it unable to read the authority it verifies the control plane against.
 
 The restart in step 3 is not optional, and it is not optional on Debian either. The installer starts the
 service, so by the time you enrol there is already an agent running — one that found no credential, said
@@ -492,17 +522,27 @@ the host already trusts and not from one whose certificate is the thing being fe
 out, the unverified fetch with the fingerprint check that makes it safe:
 
 ```powershell
-$tmp = Join-Path $env:TEMP 'hostseal-ca.crt'
-curl.exe -fsSLk https://agents.hostseal.example.org/api/v1/ca.crt -o $tmp
-$cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2 $tmp
-$sha = [System.Security.Cryptography.SHA256]::Create().ComputeHash($cert.RawData)
-$got = ($sha | ForEach-Object { $_.ToString('X2') }) -join ':'
-if ($got -eq '<the digest the panel shows>') {
+& {
+  $ErrorActionPreference = 'Stop'
+  $tmp = Join-Path $env:TEMP 'hostseal-ca.crt'
+  curl.exe -fsSLk https://agents.hostseal.example.org/api/v1/ca.crt -o $tmp
+  if ($LASTEXITCODE -ne 0) { throw 'the certificate could not be fetched; nothing was installed' }
+  $cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2 $tmp
+  $sha = [System.Security.Cryptography.SHA256]::Create().ComputeHash($cert.RawData)
+  $got = ($sha | ForEach-Object { $_.ToString('X2') }) -join ':'
+  if ($got -ne '<the digest the panel shows>') {
+    throw 'FINGERPRINT MISMATCH - do not install this certificate'
+  }
   Copy-Item -Path $tmp -Destination 'C:\Program Files\HostSeal\server-ca.crt' -Force
-} else {
-  throw 'FINGERPRINT MISMATCH - do not install this certificate'
 }
 ```
+
+The fetch is checked before anything is compared, and that ordering is the point rather than tidiness.
+Without it a failed download leaves `$cert` unset, the digest empty and the comparison false — so the
+step reports a fingerprint mismatch, naming an attack that did not happen, for a control plane that was
+merely unreachable. It is the same failure the shell version's `if`/`else` is written to avoid, and the
+mismatch is a guard clause rather than the `else` of the copy so that a copy which fails keeps its own
+error too.
 
 The digest is computed over the certificate's `RawData` rather than with `Get-FileHash`, because the
 value the panel shows is openssl's — a SHA-256 over the DER — and hashing the PEM file's bytes produces
