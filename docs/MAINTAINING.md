@@ -120,6 +120,15 @@ They do not, because only `pages.yml` deploys: `release.yml` signs the repositor
 the release as `apt-repository.tar.gz`, and `pages.yml` unpacks that beside the documentation. The
 practical benefit is that the archive signing key is absent from every documentation change.
 
+It also means the tree under `/apt` is exactly as old as the last release, whatever `main` says. A
+packaging change — the sources filename, the `Origin`, the project's own name — reaches the site only
+when a release republishes the repository, so between renaming the project and the next release the
+site serves the previous project's repository under the new project's name, install instructions and
+all, pointing at a domain that has stopped answering. `pages.yml` compares the unpacked tree against
+the packaging in the checkout and warns on the deployment when the two disagree, because nothing else
+would: every workflow involved is doing exactly what it was written to do. The repair is a release
+([§6](#6-cutting-a-release)), never a documentation push.
+
 ## 4. The APT repository URL
 
 Set the repository variable **`HOSTSEAL_APT_URL`** (Settings → Secrets and variables → Actions →

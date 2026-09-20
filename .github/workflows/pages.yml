@@ -83,6 +83,38 @@ jobs:
           echo "Unpacked the published repository:"
           find public/apt -maxdepth 2 -type d | sort
 
+      - name: Check the published repository against this checkout
+        # The tree under /apt is only ever replaced by a release, so from the moment the project is
+        # renamed until the next one the site serves the previous project's repository: a keyring, a
+        # sources file and install instructions naming a domain that has stopped answering, published
+        # under the new project's name. Nothing fails to produce that — every workflow here does what
+        # it was written to do — so it survives until somebody opens the page in a browser, which is
+        # how it was found the first time.
+        #
+        # A warning and not a failure, and the tree is published either way. The documentation is the
+        # half that can be corrected without the signing key, and holding it back would repair
+        # nothing; and dropping a mismatched tree would turn a stale `apt-get update` into a broken one
+        # for any host already pointing here, which is worse than what it fixes. The repair is a
+        # release — docs/MAINTAINING.md §6 — and this step exists to say so unprompted.
+        #
+        # What it expects is read out of the packaging in this checkout rather than written down here,
+        # so the check still holds the next time one of these names changes.
+        run: |
+          [ -d public/apt ] || exit 0
+          sources=$(basename packaging/apt/*.sources.in .in)
+          origin=$(sed -n 's/^ORIGIN=${ORIGIN:-\(.*\)}$/\1/p' packaging/apt/mkapt.sh)
+          release=$(find public/apt/dists -maxdepth 2 -name Release -print -quit)
+          published=$(sed -n 's/^Origin: //p' "${release:-/dev/null}" | head -n 1)
+          stale=
+          [ -f "public/apt/$sources" ] || stale="carries no $sources"
+          if [ -n "$published" ] && [ "$published" != "$origin" ]; then
+            stale="${stale:+$stale, and }names Origin: $published rather than $origin"
+          fi
+          [ -n "$stale" ] || exit 0
+          note="The repository unpacked under /apt $stale, so it was built before the packaging in this checkout. It will keep naming the previous project until a release republishes it; see docs/MAINTAINING.md section 6."
+          echo "::warning title=The published APT repository is out of date::$note"
+          echo "**The published APT repository is out of date.** $note" >> "$GITHUB_STEP_SUMMARY"
+
       - uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
         # Turns Pages on if nobody has. The failure mode when it is off is a red deploy at the end of a
         # release, which is the worst moment to discover a setting.
