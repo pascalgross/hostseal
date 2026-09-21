@@ -127,8 +127,10 @@ workflow that no maintainer can override:
   answers the web interface over loopback: the page says what it wants signed, the signer builds the
   document itself, prints what it means in *its* terminal, and waits for you to answer and touch the
   token. The key never reaches the browser or the control plane, and the signer will not sign anything
-  it was handed rather than assembled. See
-  [`docs/INSTALL.md`](docs/INSTALL.md#signing-from-the-web-interface).
+  it was handed rather than assembled. `--install` registers it to start at your next logon, in your own
+  session — never as a service, because a service has no terminal to confirm at. The CLI is attached to
+  every release for Linux and Windows; see
+  [`docs/INSTALL.md`](docs/INSTALL.md#the-operators-cli).
 
 ## What it will never do
 

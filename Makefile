@@ -78,6 +78,24 @@ windows: $(DIST) ## Build the Windows agent and assemble its release archive
 	cd $(WINDOWS_DIST) && zip -q -X -r ../hostseal-agent-windows-amd64.zip . && cd -
 	@echo "wrote $(DIST)/hostseal-agent-windows-amd64.zip"
 
+# The operator's CLI on its own, for the machine that holds the signing key.
+#
+# hostseal.exe is in the agent archive as well, because `hostseal enroll` runs on the host — but an
+# operator who only wants to sign is not installing a host. Telling them to download an agent's
+# installer, unpack it and use one file out of five is how a workstation ends up running a service
+# nobody meant to install, and the .ps1 sitting next to it is an invitation to run exactly that.
+WINDOWS_CLI_DIST := $(DIST)/windows-cli
+
+.PHONY: windows-cli
+windows-cli: $(DIST) ## Build the operator's CLI archive for Windows
+	mkdir -p $(WINDOWS_CLI_DIST)
+	GOOS=windows GOARCH=amd64 CGO_ENABLED=0 \
+	  go build -trimpath -ldflags '$(LDFLAGS)' -o $(WINDOWS_CLI_DIST)/hostseal.exe ./cmd/hostseal
+	@# -X for the same reason the agent archive uses it: two builds of the same source should differ
+	@# in nothing, including the metadata a zip would otherwise carry.
+	cd $(WINDOWS_CLI_DIST) && zip -q -X -r ../hostseal-windows-amd64.zip . && cd -
+	@echo "wrote $(DIST)/hostseal-windows-amd64.zip"
+
 # The Windows agent must keep cross-compiling, and `make ci` runs on Linux. Compiling it is not a test —
 # nothing here can exercise COM, the SCM or the registry — but a build failure is the one Windows defect
 # this project can catch without a Windows machine, and catching it costs seconds.
@@ -88,7 +106,7 @@ windows-build: ## Check that the Windows agent still cross-compiles
 	GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -o /dev/null ./cmd/hostseal
 	GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go vet ./cmd/hostseal-agent ./cmd/hostseal-update-scan \
 	  ./internal/winapi ./internal/updatescan ./internal/collect/platform \
-	  ./internal/signing/backend/pkcs11 ./internal/localsign
+	  ./internal/signing/backend/pkcs11 ./internal/localsign ./internal/autostart
 	@# internal/wua is vetted by golangci-lint, which can scope the unsafeptr exclusion to the one
 	@# file that earns it. Raw `go vet` has no such setting, and excluding the whole package here
 	@# would stop checking the two files that do no unsafe work at all.
@@ -193,7 +211,7 @@ golangci: ## golangci-lint, for this platform and for Windows
 WINDOWS_PACKAGES := ./cmd/hostseal/... ./cmd/hostseal-agent/... ./cmd/hostseal-update-scan/... \
   ./internal/winapi/... ./internal/wua/... ./internal/updatescan/... \
   ./internal/collect/... ./internal/agent/... ./internal/policy/... ./internal/run/... \
-  ./internal/signing/... ./internal/localsign/...
+  ./internal/signing/... ./internal/localsign/... ./internal/autostart/...
 
 .PHONY: fmt
 fmt: ## Format Go source

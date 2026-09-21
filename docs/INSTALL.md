@@ -605,7 +605,9 @@ needs two more things, and neither of them is the control plane's to give.
 
    It shows you the operation, the host, the window and the exact bytes it is about to sign, and asks
    before signing. It never talks to the control plane: if it signed a digest the server handed it, a
-   compromised control plane could display one operation and have another authorised.
+   compromised control plane could display one operation and have another authorised. `hostseal` runs
+   on your own machine and is not the agent — [the operator's CLI](#the-operators-cli) is where to get
+   it.
 
    The web interface can do the same thing without the copying — see
    [signing from the web interface](#signing-from-the-web-interface) below.
@@ -618,6 +620,59 @@ A **routine** job — `packages.applySecurity` — needs neither. The control pl
 key, and what bounds it is your host's `updates.allow`: the worst the control plane can do is make a
 host apply security updates sooner than its own timer would have.
 
+### The operator's CLI
+
+`hostseal` is the one binary that runs on **your** machine rather than on a managed host. It enrols
+hosts, generates and inspects signing keys, signs jobs and templates offline, and answers the web
+interface over loopback. It is also the only binary in HostSeal that links a signing backend — a
+PKCS#11 module, a cloud KMS — which is why no agent, helper or server does, and why a host cannot tell
+which kind of key signed the job it is verifying.
+
+Every release attaches it, for the platforms an operator signs from:
+
+```bash
+# Linux. The checksums name the paths the release was built from, so compare against that line.
+curl -fsSL -o hostseal \
+  https://github.com/pascalgross/hostseal/releases/latest/download/hostseal-linux-amd64
+curl -fsSL -o SHA256SUMS \
+  https://github.com/pascalgross/hostseal/releases/latest/download/SHA256SUMS
+grep 'dist/hostseal-linux-amd64$' SHA256SUMS | awk '{print $1}'
+sha256sum hostseal | awk '{print $1}'
+sudo install -m 0755 hostseal /usr/local/bin/hostseal
+```
+
+```powershell
+# Windows. The archive holds hostseal.exe and nothing else — it is not the agent and installs no
+# service. LOCALAPPDATA rather than Program Files: this is one operator's tool, holding one operator's
+# key, and putting it there needs no administrator.
+& {
+  $ErrorActionPreference = 'Stop'
+  $dir = Join-Path $env:LOCALAPPDATA 'HostSeal'
+  $zip = Join-Path $env:TEMP 'hostseal-windows-amd64.zip'
+  New-Item -ItemType Directory -Force -Path $dir | Out-Null
+  curl.exe -fsSL https://github.com/pascalgross/hostseal/releases/latest/download/hostseal-windows-amd64.zip -o $zip
+  if ($LASTEXITCODE -ne 0) { throw 'the download failed; nothing has been installed' }
+  Expand-Archive -Path $zip -DestinationPath $dir -Force
+  Unblock-File -Path (Join-Path $dir 'hostseal.exe')
+
+  # Nothing puts it on PATH for you. New sessions only — this one already has the old value.
+  $user = [Environment]::GetEnvironmentVariable('Path', 'User')
+  if ($user -notlike "*$dir*") {
+    [Environment]::SetEnvironmentVariable('Path', "$user;$dir", 'User')
+  }
+}
+```
+
+From source, `make build` writes it to `dist/hostseal` along with everything else.
+
+What **not** to do is install a host's package to get it. The `.deb` and
+`hostseal-agent-windows-amd64.zip` both carry the same `hostseal` binary, because `hostseal enroll`
+runs on the host being enrolled and a machine with only the agent could never enrol. Installing either
+of them on a workstation brings an agent with it: the package enables and starts
+`hostseal-agent.service` and the three root-helper sockets, and `Install-HostSealAgent.ps1` registers
+and starts the Windows service. Neither is wrong on a host and neither belongs on the machine that
+holds your signing key.
+
 ### Signing from the web interface
 
 Copying a JSON document out of a terminal and into a browser is not the interesting part of signing,
@@ -625,8 +680,9 @@ and on a Windows workstation it was for a long time the only way to use a YubiKe
 tool will answer the browser directly:
 
 ```powershell
-# On the machine your token is plugged into. Windows, with Yubico's PKCS#11 module:
-hostseal signer `
+# On the machine your token is plugged into. Windows, with Yubico's PKCS#11 module. By path, because
+# nothing adds hostseal.exe to PATH — `hostseal signer` works once you have added it yourself, above.
+& "$env:LOCALAPPDATA\HostSeal\hostseal.exe" signer `
   --key "pkcs11:token=YubiKey PIV #12345678;object=SIGN key?module-path=C:\Program Files\Yubico\Yubico PIV Tool\bin\libykcs11.dll" `
   --origin https://hostseal.example.org
 ```
@@ -654,6 +710,38 @@ Three things are worth knowing before you rely on it:
   Without it, any page in your browser could ask your signer for a signature.
 - **The signer exits after half an hour of doing nothing** (`--idle`), because a logged-in token
   session nobody is using is worth closing. Start it again when you need it.
+
+#### Starting it at logon
+
+Remembering to start the signer is the part nobody does, and the moment you remember it is the moment
+the Jobs page has already told you that nothing answered. On Windows, `--install` registers the command
+you just typed to run at your next logon:
+
+```powershell
+& "$env:LOCALAPPDATA\HostSeal\hostseal.exe" signer `
+  --key "pkcs11:token=YubiKey PIV #12345678;object=SIGN key?module-path=C:\Program Files\Yubico\Yubico PIV Tool\bin\libykcs11.dll" `
+  --origin https://hostseal.example.org `
+  --install
+```
+
+It writes one value — `HostSeal signer`, under `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`
+— and prints the command line it registered, so you can read what will run before a logon depends on
+it. Nothing is elevated, nothing is registered for the other accounts on that machine, and your token
+is not opened: run the same command without `--install` once, so that a wrong module path is something
+you find now rather than at a logon. `--uninstall` removes the registration, needs none of the other
+flags, and is safe to run whether or not there is one.
+
+What starts is the same program in your own session, in a window of its own, asking for the PIN there.
+The idle exit is unchanged — a signer nothing has asked for anything in half an hour still stops, and
+the next one starts at your next logon — so this shortens the typing rather than lengthening the time a
+token session is open.
+
+It is deliberately **not** a service, and that is a refusal rather than a gap. Every signature is
+confirmed at the signer's own terminal; that confirmation is the control, not the loopback bind and not
+the origin list. A Windows service runs in session 0 with no console to read an answer from, so a signer
+installed as one would decline every request it ever received — and the only way to make it useful again
+would be a flag that signs without asking, which is the signing oracle this whole arrangement exists to
+refuse. On Linux `--install` refuses for the same reason: a systemd user unit has no terminal either.
 
 For an operator without a signer running, the Jobs page prints the `hostseal sign` command for what
 they filled in and takes the signed document back by paste. Same signature, two more steps.
