@@ -463,6 +463,19 @@ type TemplateSummary struct {
 	// Signed reports whether the latest version carries an offline signature, which is what decides
 	// whether an enrolling host can be issued this template at all.
 	Signed bool
+
+	// Archived reports whether the name has been withdrawn from use.
+	//
+	// On the summary rather than only in a separate lookup because the listing is where an operator
+	// decides what to open: a withdrawn template that looked exactly like a live one would be edited,
+	// rendered and wondered about before anything said it had been retired.
+	Archived bool
+
+	// ArchivedAt is when the name was withdrawn, zero when it is live.
+	ArchivedAt time.Time
+
+	// ArchivedBy is the operator who withdrew it, empty when it is live.
+	ArchivedBy string
 }
 
 // TemplateRevision is one stored version of a template, without its body.
@@ -488,6 +501,40 @@ type TemplateRevision struct {
 
 	// SignerKeyID names the key that signed it, empty when unsigned.
 	SignerKeyID string
+}
+
+// TemplateArchival records that a template name has been withdrawn from use.
+//
+// It is the answer to "delete this template", which this store deliberately cannot do. A version is
+// immutable and permanent because a host's Tier 2 bootstrap record names one and has to resolve to the
+// bytes that actually ran — so what an operator retiring a template can be given is everything they
+// meant by deleting it except the destruction of that evidence: the name leaves the listing, refuses
+// new versions, cannot be named by a new enrolment token, cannot be rendered, and is refused at
+// enrolment.
+//
+// A record about the name, never a column on a version, which is why it is its own type: the templates
+// rows stay written-once, and archiving touches none of them.
+type TemplateArchival struct {
+	// Name is the template that was withdrawn.
+	Name string
+
+	// ArchivedAt is when it was withdrawn. Zero means the name is live, which is what the store
+	// returns for a template nobody has archived — the absence of a record is the ordinary state, not
+	// an error.
+	ArchivedAt time.Time
+
+	// ArchivedBy is the operator who withdrew it, for the audit trail. It is the answer to the
+	// question an operator asks when an enrolment is refused for a template they did not retire.
+	ArchivedBy string
+}
+
+// Archived reports whether this record describes a withdrawn name.
+//
+// A method rather than a comparison at each site, for the reason TemplateVersion.Signed is one: half a
+// dozen call sites decide whether to refuse based on this, and "archived" has to mean the same thing at
+// the enrolment path as it does in the listing.
+func (a TemplateArchival) Archived() bool {
+	return !a.ArchivedAt.IsZero()
 }
 
 // Online reports whether the host has been heard from recently enough to be considered up.
@@ -1439,7 +1486,40 @@ type Scoped interface {
 	CreateTemplateVersion(ctx context.Context, t TemplateVersion) (int, error)
 
 	// ListTemplates returns one summary per template name, newest latest-version first.
-	ListTemplates(ctx context.Context) ([]TemplateSummary, error)
+	//
+	// Archived names are left out unless includeArchived says otherwise. The default is the one an
+	// operator wants on a page they read every day; the flag is what makes the omission honest, because
+	// a retired template that could not be listed again could not be restored either.
+	ListTemplates(ctx context.Context, includeArchived bool) ([]TemplateSummary, error)
+
+	// ArchiveTemplate withdraws a template name from use, leaving every stored version intact.
+	//
+	// This is as close to deleting a template as this store comes, and the distance is the point.
+	// Nothing is destroyed: the versions stay readable, so a host's bootstrap record still resolves to
+	// the bytes that ran, and the record of the withdrawal names who made it. What changes is what the
+	// name may still be used *for* — see TemplateArchival.
+	//
+	// It returns ErrNotFound for a name with no versions, and ErrConflict for one already archived. The
+	// second is a conflict rather than a no-op so that a client acting on a stale listing learns that
+	// it was stale.
+	ArchiveTemplate(ctx context.Context, a TemplateArchival) error
+
+	// RestoreTemplate puts an archived template name back into use.
+	//
+	// It deletes the archival record and nothing else, which is why the record carries nothing that
+	// could be lost. Restoring is not an approval of anything: the restored name is issuable at
+	// enrolment again only under exactly the conditions that governed it before, signature included.
+	//
+	// It returns ErrNotFound for a name with no versions, and ErrConflict for one that is not archived.
+	RestoreTemplate(ctx context.Context, name string) error
+
+	// GetTemplateArchival reports whether a template name has been withdrawn, and by whom.
+	//
+	// A live name is the zero value and no error, because "not archived" is the ordinary state of every
+	// template ever stored. A separate read rather than a field on TemplateVersion: a version is a row
+	// written once and never updated, and a field on it that came from another table and changed
+	// underneath would make that sentence false for whoever read it next.
+	GetTemplateArchival(ctx context.Context, name string) (TemplateArchival, error)
 
 	// ListTemplateVersions returns every stored revision of one template, newest first.
 	//

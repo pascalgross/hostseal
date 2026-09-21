@@ -22,6 +22,20 @@ type templateKey struct {
 	version int
 }
 
+// templateNameKey identifies one template *name* within a tenant, which is what an archival is about.
+//
+// A second key type rather than templateKey with version 0, because "the name" and "version zero" are
+// different things and a sentinel version would be one typo away from a lookup that silently matched a
+// version row. The tenant is in it for the reason it is in templateKey: two fleets naming a template
+// "standard-server" is ordinary.
+type templateNameKey struct {
+	// tenant owns the template.
+	tenant TenantID
+
+	// name is the template's identifier within its tenant.
+	name string
+}
+
 // CreateTemplateVersion stores the next version of a template and returns the number it was given.
 //
 // The scan for the current maximum runs under the store's one lock, so the assignment is atomic here
@@ -47,7 +61,11 @@ func (s *scopedMemory) CreateTemplateVersion(_ context.Context, t TemplateVersio
 }
 
 // ListTemplates returns one summary per template name, newest latest-version first.
-func (s *scopedMemory) ListTemplates(_ context.Context) ([]TemplateSummary, error) {
+//
+// Archived names are filtered here rather than by the caller, matching the PostgreSQL statement: a
+// listing that returned them and relied on every reader to drop them would put the retired template
+// back on screen the first time a reader forgot.
+func (s *scopedMemory) ListTemplates(_ context.Context, includeArchived bool) ([]TemplateSummary, error) {
 	s.store.mu.Lock()
 	defer s.store.mu.Unlock()
 
@@ -63,12 +81,19 @@ func (s *scopedMemory) ListTemplates(_ context.Context) ([]TemplateSummary, erro
 
 	out := make([]TemplateSummary, 0, len(latest))
 	for _, t := range latest {
+		archival := s.store.archivedTemplates[templateNameKey{tenant: s.tenant, name: t.Name}]
+		if archival.Archived() && !includeArchived {
+			continue
+		}
 		out = append(out, TemplateSummary{
 			Name:          t.Name,
 			LatestVersion: t.Version,
 			CreatedAt:     t.CreatedAt,
 			CreatedBy:     t.CreatedBy,
 			Signed:        t.Signed(),
+			Archived:      archival.Archived(),
+			ArchivedAt:    archival.ArchivedAt,
+			ArchivedBy:    archival.ArchivedBy,
 		})
 	}
 	sort.Slice(out, func(i, j int) bool {
@@ -131,6 +156,65 @@ func (s *scopedMemory) GetTemplateVersion(_ context.Context, name string, versio
 		return TemplateVersion{}, ErrNotFound
 	}
 	return found, nil
+}
+
+// ArchiveTemplate withdraws a template name from use, leaving every stored version intact.
+//
+// Nothing is deleted from the version map here, and the same is true of the PostgreSQL implementation:
+// a host's bootstrap record names a version, and this store has no method that could take one away.
+func (s *scopedMemory) ArchiveTemplate(_ context.Context, a TemplateArchival) error {
+	s.store.mu.Lock()
+	defer s.store.mu.Unlock()
+
+	if !s.hasTemplateLocked(a.Name) {
+		return ErrNotFound
+	}
+	key := templateNameKey{tenant: s.tenant, name: a.Name}
+	if s.store.archivedTemplates[key].Archived() {
+		return ErrConflict
+	}
+	s.store.archivedTemplates[key] = a
+	return nil
+}
+
+// RestoreTemplate puts an archived template name back into use.
+func (s *scopedMemory) RestoreTemplate(_ context.Context, name string) error {
+	s.store.mu.Lock()
+	defer s.store.mu.Unlock()
+
+	if !s.hasTemplateLocked(name) {
+		return ErrNotFound
+	}
+	key := templateNameKey{tenant: s.tenant, name: name}
+	if !s.store.archivedTemplates[key].Archived() {
+		return ErrConflict
+	}
+	delete(s.store.archivedTemplates, key)
+	return nil
+}
+
+// GetTemplateArchival reports whether a template name has been withdrawn, and by whom.
+//
+// A name nobody archived is the zero value and no error, matching PostgreSQL's missing row.
+func (s *scopedMemory) GetTemplateArchival(_ context.Context, name string) (TemplateArchival, error) {
+	s.store.mu.Lock()
+	defer s.store.mu.Unlock()
+
+	return s.store.archivedTemplates[templateNameKey{tenant: s.tenant, name: name}], nil
+}
+
+// hasTemplateLocked reports whether this tenant has stored any version under a name.
+//
+// It is what tells "no such template" apart from "already archived", which the PostgreSQL
+// implementation gets from an EXISTS in the same statement. The caller holds the lock, so the two
+// halves of an archive cannot interleave with a save the way two round trips could.
+func (s *scopedMemory) hasTemplateLocked(name string) bool {
+	for key := range s.store.templates {
+		if key.tenant == s.tenant && key.name == name {
+			return true
+		}
+	}
+	return false
 }
 
 // GetEnrollmentToken returns one token by hash without consuming it, or ErrTokenUnusable.

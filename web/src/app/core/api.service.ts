@@ -32,6 +32,7 @@ import {
   SignInRequest,
   SignedIn,
   StoredTemplateVersion,
+  TemplateArchivalResult,
   TemplateVersion,
   TemplateVersionsResponse,
   TemplatesResponse,
@@ -407,9 +408,47 @@ export class ApiService {
     return this.http.delete(`/api/v1/alerts/${encodeURIComponent(id)}`, { headers: this.headers() });
   }
 
-  /** Fetches one summary per provisioning template. */
-  templates(): Observable<TemplatesResponse> {
-    return this.http.get<TemplatesResponse>('/api/v1/templates', { headers: this.headers() });
+  /**
+   * Fetches one summary per provisioning template.
+   *
+   * Archived templates are left out unless asked for. Hidden by default because that is what
+   * retiring one was for; askable because a name nobody can list is a name nobody can restore.
+   */
+  templates(includeArchived = false): Observable<TemplatesResponse> {
+    const query = includeArchived ? '?include=archived' : '';
+    return this.http.get<TemplatesResponse>(`/api/v1/templates${query}`, {
+      headers: this.headers(),
+    });
+  }
+
+  /**
+   * Withdraws a template name from use, leaving every stored version readable.
+   *
+   * This is the page's delete button, and the difference from a delete is the reason it can exist at
+   * all: nothing is destroyed, so a host's bootstrap record still resolves to the bytes that ran.
+   * What changes is what the name may still be used for — new versions, renders, enrolment tokens
+   * and enrolments are refused until it is restored.
+   */
+  archiveTemplate(name: string): Observable<TemplateArchivalResult> {
+    return this.http.post<TemplateArchivalResult>(
+      `/api/v1/templates/${encodeURIComponent(name)}/archive`,
+      {},
+      { headers: this.headers() },
+    );
+  }
+
+  /**
+   * Puts an archived template name back into use.
+   *
+   * It grants nothing the name did not already have: a restored template is issuable at enrolment
+   * only under the conditions that governed it before, signature included.
+   */
+  restoreTemplate(name: string): Observable<TemplateArchivalResult> {
+    return this.http.post<TemplateArchivalResult>(
+      `/api/v1/templates/${encodeURIComponent(name)}/restore`,
+      {},
+      { headers: this.headers() },
+    );
   }
 
   /** Fetches one version of a template in full, defaulting to the latest. */
@@ -439,7 +478,8 @@ export class ApiService {
    * Stores the next version of a template.
    *
    * There is no update method and no delete, which is the storage model rather than an omission: a
-   * host's bootstrap record names a version and must resolve to the bytes that actually ran.
+   * host's bootstrap record names a version and must resolve to the bytes that actually ran. What a
+   * retirement looks like instead is `archiveTemplate` above.
    */
   createTemplate(request: CreateTemplateRequest): Observable<StoredTemplateVersion> {
     return this.http.post<StoredTemplateVersion>('/api/v1/templates', request, {

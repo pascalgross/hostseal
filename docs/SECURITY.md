@@ -926,6 +926,20 @@ the intent catalogue, so `internal/provision` refuses to be a template language 
 saved revision is a new immutable version, because the Tier 2 record below names one and a record that
 resolves to editable bytes is not a record.
 
+A template is therefore never deleted, and the control plane has no endpoint that could delete one.
+What an operator retiring a template gets instead is an **archival**, which withdraws the *name*: an
+archived template leaves the listing, refuses new versions, cannot be named by a new enrolment token,
+cannot be rendered, and is refused at enrolment — while every stored version stays readable, so the
+record on a host still resolves to the bytes that ran on it. The enrolment check runs twice: once
+before the certificate is issued, so that a refusal leaves the token usable, and once more after the
+token has been redeemed, because redemption is the moment an enrolment becomes the one that happened
+and a template withdrawn in between must not still be handed over. The archival is a row about the name in a
+table of its own, never a column on a version, because a version is written once and never updated and
+an UPDATE path added to carry a flag would be an UPDATE path whatever it was first used for. Restoring
+deletes that row and changes nothing else: a restored template is issuable at enrolment only on the
+conditions that already governed it, signature included, so undoing an archival can never be the step
+that lets something reach a host.
+
 HostSeal ships no template: what a machine should look like on its first boot is a decision about a
 fleet. One worked body — unattended upgrades left on, a `wheel` group, `su` restricted to it — is in
 [`examples/cloud-init/`](../examples/cloud-init/README.md), as an example to read rather than a default
@@ -936,8 +950,8 @@ once, on a host that is being enrolled by hand. The template arrives in the enro
 a signature the control plane stored but cannot mint — it is produced offline by
 `hostseal sign-template`, with a key the control plane does not hold, and the enrolment token must have
 been minted naming that template, so holding a leaked token is not the authority to choose what runs.
-An agent that asked for a template and receives none, or an unsigned one, fails the enrolment loudly
-rather than continuing as though something had been applied. Every one of these guardrails is required:
+An agent that asked for a template and receives none, or an unsigned one, or one the fleet has since
+archived, fails the enrolment loudly rather than continuing as though something had been applied. Every one of these guardrails is required:
 
 1. Explicit `--bootstrap NAME` on that specific invocation. Never implicit, never a server default,
    never a group setting.
