@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"errors"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 )
@@ -62,19 +63,28 @@ func (s *scopedPostgres) CreateTemplateVersion(ctx context.Context, t TemplateVe
 // DISTINCT ON with a matching ORDER BY is the idiomatic PostgreSQL "latest row per group", and it runs
 // against the primary key: for each (tenant, name) the highest version wins, and the outer sort puts
 // the most recently changed template first, which is the order an operator scanning the page wants.
-func (s *scopedPostgres) ListTemplates(ctx context.Context) ([]TemplateSummary, error) {
+//
+// The archival is a LEFT JOIN rather than a second query, so a name cannot appear live in the listing
+// because its withdrawal was read a moment later, and the filter is on the joined row rather than on a
+// NOT EXISTS so that one statement serves both callers.
+func (s *scopedPostgres) ListTemplates(ctx context.Context, includeArchived bool) ([]TemplateSummary, error) {
 	var out []TemplateSummary
 	err := s.withTenant(ctx, "listing templates", func(tx pgx.Tx) error {
 		rows, err := tx.Query(ctx, `
-			SELECT name, version, created_at, created_by,
-			       (signature <> '' AND signer_key_id <> '' AND signer_algorithm <> '') AS signed,
-			       signer_key_id, signer_algorithm
+			SELECT latest.name, latest.version, latest.created_at, latest.created_by,
+			       (latest.signature <> '' AND latest.signer_key_id <> ''
+			            AND latest.signer_algorithm <> '') AS signed,
+			       latest.signer_key_id, latest.signer_algorithm,
+			       a.archived_at, COALESCE(a.archived_by, '')
 			  FROM (SELECT DISTINCT ON (name) name, version, created_at, created_by, signature,
 			               signer_key_id, signer_algorithm
 			          FROM templates
 			         WHERE tenant_id = $1
 			         ORDER BY name, version DESC) AS latest
-			 ORDER BY created_at DESC`, string(s.tenant))
+			  LEFT JOIN template_archivals AS a
+			         ON a.tenant_id = $1 AND a.name = latest.name
+			 WHERE $2 OR a.name IS NULL
+			 ORDER BY latest.created_at DESC`, string(s.tenant), includeArchived)
 		if err != nil {
 			return wrap(err, "listing templates")
 		}
@@ -82,9 +92,14 @@ func (s *scopedPostgres) ListTemplates(ctx context.Context) ([]TemplateSummary, 
 
 		for rows.Next() {
 			var t TemplateSummary
+			var archivedAt *time.Time
 			if err := rows.Scan(&t.Name, &t.LatestVersion, &t.CreatedAt, &t.CreatedBy,
-				&t.Signed, &t.SignerKeyID, &t.SignerAlgorithm); err != nil {
+				&t.Signed, &t.SignerKeyID, &t.SignerAlgorithm,
+				&archivedAt, &t.ArchivedBy); err != nil {
 				return wrap(err, "scanning a template summary")
+			}
+			if archivedAt != nil {
+				t.Archived, t.ArchivedAt = true, *archivedAt
 			}
 			out = append(out, t)
 		}
@@ -94,6 +109,84 @@ func (s *scopedPostgres) ListTemplates(ctx context.Context) ([]TemplateSummary, 
 		return nil, err
 	}
 	return out, nil
+}
+
+// ArchiveTemplate withdraws a template name from use, leaving every stored version intact.
+//
+// The INSERT is conditional on the name existing, in one statement, so that "no such template" and
+// "already archived" are told apart without a read the caller could race: no rows inserted means the
+// name has no versions, and the primary key refuses a second archival as ErrConflict. There is no
+// UPDATE and no DELETE against `templates` anywhere in this file, which is the property the whole tier
+// rests on.
+func (s *scopedPostgres) ArchiveTemplate(ctx context.Context, a TemplateArchival) error {
+	return s.withTenant(ctx, "archiving a template", func(tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx, `
+			INSERT INTO template_archivals (tenant_id, name, archived_at, archived_by)
+			SELECT $1, $2, $3, $4
+			 WHERE EXISTS (SELECT 1 FROM templates WHERE tenant_id = $1 AND name = $2)`,
+			string(s.tenant), a.Name, a.ArchivedAt, a.ArchivedBy)
+		if err != nil {
+			return wrap(err, "archiving a template")
+		}
+		if tag.RowsAffected() == 0 {
+			return ErrNotFound
+		}
+		return nil
+	})
+}
+
+// RestoreTemplate puts an archived template name back into use.
+//
+// The existence check and the delete run in one transaction, so the two refusals stay distinct: a name
+// nobody ever stored is ErrNotFound, and a live name is ErrConflict — which is what a client acting on
+// a stale listing needs to hear, rather than a success that changed nothing.
+func (s *scopedPostgres) RestoreTemplate(ctx context.Context, name string) error {
+	return s.withTenant(ctx, "restoring a template", func(tx pgx.Tx) error {
+		var exists bool
+		if err := tx.QueryRow(ctx, `
+			SELECT EXISTS (SELECT 1 FROM templates WHERE tenant_id = $1 AND name = $2)`,
+			string(s.tenant), name).Scan(&exists); err != nil {
+			return wrap(err, "restoring a template")
+		}
+		if !exists {
+			return ErrNotFound
+		}
+		tag, err := tx.Exec(ctx, `
+			DELETE FROM template_archivals WHERE tenant_id = $1 AND name = $2`,
+			string(s.tenant), name)
+		if err != nil {
+			return wrap(err, "restoring a template")
+		}
+		if tag.RowsAffected() == 0 {
+			return ErrConflict
+		}
+		return nil
+	})
+}
+
+// GetTemplateArchival reports whether a template name has been withdrawn, and by whom.
+//
+// A missing row is the zero value and no error: every template that was never archived is this answer,
+// and a caller on the enrolment path asking "may this still be issued" must not have to tell an
+// ordinary state apart from a failure to read.
+func (s *scopedPostgres) GetTemplateArchival(ctx context.Context, name string) (TemplateArchival, error) {
+	var a TemplateArchival
+	err := s.withTenant(ctx, "reading a template archival", func(tx pgx.Tx) error {
+		err := tx.QueryRow(ctx, `
+			SELECT name, archived_at, archived_by
+			  FROM template_archivals
+			 WHERE tenant_id = $1 AND name = $2`, string(s.tenant), name,
+		).Scan(&a.Name, &a.ArchivedAt, &a.ArchivedBy)
+		if errors.Is(err, pgx.ErrNoRows) {
+			a = TemplateArchival{}
+			return nil
+		}
+		return wrap(err, "reading a template archival")
+	})
+	if err != nil {
+		return TemplateArchival{}, err
+	}
+	return a, nil
 }
 
 // ListTemplateVersions returns every stored revision of one template, newest first.

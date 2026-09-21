@@ -718,21 +718,7 @@ func TestABootstrapIsCheckedWhereItsBytesAreChosen(t *testing.T) {
 // about it: the summary listing, the version itself, and the revision history.
 func TestASignedVersionNamesItsKeyAndAlgorithmEverywhereItIsListed(t *testing.T) {
 	h := newHarness(t)
-
-	_, private, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatalf("generating the operator key: %v", err)
-	}
-	body := "#cloud-config\nhostname: signed\n"
-	payload, err := canonical.Marshal(protocol.Bootstrap{Name: "standard-server", Body: body}.SignedPayload())
-	if err != nil {
-		t.Fatalf("canonicalising: %v", err)
-	}
-	h.saveTemplate(t, h.adminToken, map[string]any{
-		"name": "standard-server", "body": body,
-		"signature":   base64.StdEncoding.EncodeToString(ed25519.Sign(private, payload)),
-		"signerKeyId": "ops-yubikey-1", "signerAlgorithm": "ed25519",
-	})
+	h.saveSignedTemplate(t, "standard-server", "#cloud-config\nhostname: signed\n")
 
 	for _, path := range []string{
 		"/api/v1/templates",
@@ -743,10 +729,358 @@ func TestASignedVersionNamesItsKeyAndAlgorithmEverywhereItIsListed(t *testing.T)
 		if status != http.StatusOK {
 			t.Fatalf("%s: %d %s", path, status, raw)
 		}
-		for _, want := range []string{`"signerKeyId":"ops-yubikey-1"`, `"signerAlgorithm":"ed25519"`} {
+		for _, want := range []string{`"signerKeyId":"ops-laptop"`, `"signerAlgorithm":"ed25519"`} {
 			if !strings.Contains(string(raw), want) {
 				t.Errorf("%s does not carry %s: %s", path, want, raw)
 			}
 		}
+	}
+}
+
+// saveSignedTemplate stores one signed version through the API, signed the way an operator's offline
+// tool signs it, and returns the base64 signature.
+//
+// A helper because more than one test now needs a template that is actually issuable at enrolment:
+// the interesting refusals are the ones that happen to a template which would otherwise have been
+// handed over, and an unsigned fixture would be refused a step earlier for an unrelated reason.
+func (h *harness) saveSignedTemplate(t *testing.T, name, body string) string {
+	t.Helper()
+
+	_, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generating the operator key: %v", err)
+	}
+	payload, err := canonical.Marshal(protocol.Bootstrap{Name: name, Body: body}.SignedPayload())
+	if err != nil {
+		t.Fatalf("canonicalising: %v", err)
+	}
+	signature := base64.StdEncoding.EncodeToString(ed25519.Sign(private, payload))
+	h.saveTemplate(t, h.adminToken, map[string]any{
+		"name": name, "body": body,
+		"signature": signature, "signerKeyId": "ops-laptop", "signerAlgorithm": "ed25519",
+	})
+	return signature
+}
+
+// TestArchivingRetiresATemplateWithoutDestroyingIt is the whole feature in one arc.
+//
+// The templates page has never had a delete button and is never going to have one: a version is what a
+// host's bootstrap record names, and docs/SECURITY.md §7 rests on that record resolving to the bytes
+// that ran. Archiving is what an operator reaching for that button actually wants — the name stops
+// being usable — and this walks the difference: gone from the listing, refused for every use, and still
+// readable version by version.
+func TestArchivingRetiresATemplateWithoutDestroyingIt(t *testing.T) {
+	h := newHarness(t)
+	h.saveTemplate(t, h.adminToken, map[string]any{"name": "standard-server", "body": templateBody})
+
+	status, raw := h.adminJSON(t, h.adminToken, http.MethodPost,
+		"/api/v1/templates/standard-server/archive", nil)
+	if status != http.StatusOK {
+		t.Fatalf("archiving: %d %s", status, raw)
+	}
+
+	// Gone from the listing an operator reads.
+	if names := h.templateNames(t, ""); len(names) != 0 {
+		t.Fatalf("an archived template is still listed: %v", names)
+	}
+	// Listable on request, and marked — otherwise it could never be restored.
+	status, raw = h.adminJSON(t, h.adminToken, http.MethodGet, "/api/v1/templates?include=archived", nil)
+	if status != http.StatusOK {
+		t.Fatalf("listing with archived: %d %s", status, raw)
+	}
+	if !strings.Contains(string(raw), `"archived":true`) ||
+		!strings.Contains(string(raw), `"archivedBy"`) {
+		t.Fatalf("the archived template is not marked in the listing: %s", raw)
+	}
+
+	// Still readable, version by version, which is the half a delete could not offer.
+	status, raw = h.adminJSON(t, h.adminToken, http.MethodGet, "/api/v1/templates/standard-server", nil)
+	if status != http.StatusOK {
+		t.Fatalf("reading an archived template: %d %s", status, raw)
+	}
+	var version map[string]any
+	if err := json.Unmarshal(raw, &version); err != nil {
+		t.Fatalf("decoding the version: %v", err)
+	}
+	if version["body"].(string) != templateBody {
+		t.Fatalf("the body did not survive archiving: %+v", version)
+	}
+	if version["archived"] != true {
+		t.Fatalf("the version pane is not told the template is archived: %+v", version)
+	}
+	status, raw = h.adminJSON(t, h.adminToken, http.MethodGet,
+		"/api/v1/templates/standard-server/versions", nil)
+	if status != http.StatusOK || !strings.Contains(string(raw), `"version":1`) {
+		t.Fatalf("the revision history did not survive archiving: %d %s", status, raw)
+	}
+
+	// And every use of the name is refused, with the same code each time.
+	for _, refusal := range []struct {
+		what   string
+		method string
+		path   string
+		body   map[string]any
+	}{
+		{"a new version", http.MethodPost, "/api/v1/templates",
+			map[string]any{"name": "standard-server", "body": "#cloud-config\n{}"}},
+		{"a render", http.MethodPost, "/api/v1/templates/standard-server/render",
+			map[string]any{}},
+		{"a token naming it", http.MethodPost, "/api/v1/tokens",
+			map[string]any{"label": "t", "bootstrap": "standard-server"}},
+	} {
+		t.Run(refusal.what, func(t *testing.T) {
+			status, raw := h.adminJSON(t, h.adminToken, refusal.method, refusal.path, refusal.body)
+			if status != http.StatusConflict || !strings.Contains(string(raw), "archived_template") {
+				t.Fatalf("%s against an archived template: %d %s", refusal.what, status, raw)
+			}
+		})
+	}
+
+	// Restoring puts it back, and the name works again exactly as before.
+	status, raw = h.adminJSON(t, h.adminToken, http.MethodPost,
+		"/api/v1/templates/standard-server/restore", nil)
+	if status != http.StatusOK {
+		t.Fatalf("restoring: %d %s", status, raw)
+	}
+	if names := h.templateNames(t, ""); len(names) != 1 || names[0] != "standard-server" {
+		t.Fatalf("a restored template is not listed: %v", names)
+	}
+	saved := h.saveTemplate(t, h.adminToken, map[string]any{
+		"name": "standard-server", "body": "#cloud-config\n{}",
+	})
+	if saved["version"].(float64) != 2 {
+		t.Fatalf("the version after a restore: %+v", saved)
+	}
+}
+
+// templateNames lists the fleet's templates through the API and returns their names.
+func (h *harness) templateNames(t *testing.T, query string) []string {
+	t.Helper()
+
+	status, raw := h.adminJSON(t, h.adminToken, http.MethodGet, "/api/v1/templates"+query, nil)
+	if status != http.StatusOK {
+		t.Fatalf("listing templates: %d %s", status, raw)
+	}
+	var decoded struct {
+		Templates []struct {
+			Name string `json:"name"`
+		} `json:"templates"`
+	}
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		t.Fatalf("decoding the listing: %v", err)
+	}
+	names := make([]string, 0, len(decoded.Templates))
+	for _, tpl := range decoded.Templates {
+		names = append(names, tpl.Name)
+	}
+	return names
+}
+
+// TestAnArchivedTemplateIsRefusedAtEnrolment is where archiving has to hold, because it is the one
+// path on which a template reaches a machine.
+//
+// A token names a template and never a version, so the decision of what to hand over is taken at
+// enrolment — which is also where a template retired during that token's lifetime would otherwise slip
+// through. The refusal is loud for the same reason every other refusal on this path is: an agent that
+// asked for a bootstrap and silently received none would carry on as though one had been applied.
+func TestAnArchivedTemplateIsRefusedAtEnrolment(t *testing.T) {
+	h := newHarness(t)
+	signature := h.saveSignedTemplate(t, "standard-server", "#cloud-config\nhostname: bootstrapped\n")
+
+	// The token is minted while the template is live, so this is the race the check exists for: the
+	// mint-time check passed, and the template was retired afterwards.
+	token := h.issueBootstrapToken(t, "standard-server")
+	status, raw := h.adminJSON(t, h.adminToken, http.MethodPost,
+		"/api/v1/templates/standard-server/archive", nil)
+	if status != http.StatusOK {
+		t.Fatalf("archiving: %d %s", status, raw)
+	}
+
+	code, _, body := h.enrollDirect(t, protocol.EnrollRequest{
+		Token: token, Hostname: "web-01", RequestedBootstrap: "standard-server",
+	})
+	if code != http.StatusConflict || !strings.Contains(string(body), "archived_template") {
+		t.Fatalf("an archived template was not refused at enrolment: %d %s", code, body)
+	}
+	if strings.Contains(string(body), signature) {
+		t.Fatalf("the refusal handed over the signature: %s", body)
+	}
+
+	// The refusal consumed nothing: the same token still enrols the machine without a bootstrap, which
+	// is the retry an operator actually makes.
+	code, res, body := h.enrollDirect(t, protocol.EnrollRequest{Token: token, Hostname: "web-01"})
+	if code != http.StatusOK || res.HostID == "" {
+		t.Fatalf("the token did not survive the refusal: %d %s", code, body)
+	}
+	if res.Bootstrap != nil {
+		t.Fatalf("an enrolment that asked for nothing was issued %+v", res.Bootstrap)
+	}
+
+	// And restoring makes it issuable again — on the conditions that already governed it, signature
+	// included, which is why undoing an archival can never be what lets something reach a host.
+	status, raw = h.adminJSON(t, h.adminToken, http.MethodPost,
+		"/api/v1/templates/standard-server/restore", nil)
+	if status != http.StatusOK {
+		t.Fatalf("restoring: %d %s", status, raw)
+	}
+	code, res, body = h.enrollDirect(t, protocol.EnrollRequest{
+		Token: h.issueBootstrapToken(t, "standard-server"), Hostname: "web-02",
+		RequestedBootstrap: "standard-server",
+	})
+	if code != http.StatusOK || res.Bootstrap == nil || res.Bootstrap.Signature != signature {
+		t.Fatalf("a restored template was not issued unchanged: %d %s", code, body)
+	}
+}
+
+// TestArchivingIsScopedToOneFleet proves a withdrawal is a statement about one fleet's provisioning.
+//
+// Two fleets naming a template "standard-server" is ordinary, and one retiring theirs must not stop the
+// other's enrolments — an outage one customer could inflict on another, reached through an endpoint
+// that looks like housekeeping.
+func TestArchivingIsScopedToOneFleet(t *testing.T) {
+	h := newHarness(t)
+	h.saveTemplate(t, h.adminToken, map[string]any{"name": "standard-server", "body": templateBody})
+	if _, err := h.store.In(h.otherTenant).CreateTemplateVersion(context.Background(),
+		store.TemplateVersion{
+			Name: "standard-server", BodySealed: sealForHarness(t, h, "#cloud-config\n{}"),
+			CreatedAt: time.Now().UTC(), CreatedBy: "test:beta",
+		}); err != nil {
+		t.Fatalf("storing beta's template: %v", err)
+	}
+
+	status, raw := h.adminJSON(t, h.adminToken, http.MethodPost,
+		"/api/v1/templates/standard-server/archive", nil)
+	if status != http.StatusOK {
+		t.Fatalf("alpha archiving: %d %s", status, raw)
+	}
+
+	archival, err := h.store.In(h.otherTenant).GetTemplateArchival(context.Background(),
+		"standard-server")
+	if err != nil {
+		t.Fatalf("reading beta's archival: %v", err)
+	}
+	if archival.Archived() {
+		t.Fatalf("alpha's archival withdrew beta's template: %+v", archival)
+	}
+}
+
+// TestArchiveAndRestoreRefuseTheStatesTheyAreAlreadyIn proves a stale client is told it is stale.
+//
+// Two operators looking at the same page is the ordinary case, and a second archive answered with a
+// success would leave them disagreeing about who retired what — the record names one of them.
+func TestArchiveAndRestoreRefuseTheStatesTheyAreAlreadyIn(t *testing.T) {
+	h := newHarness(t)
+	h.saveTemplate(t, h.adminToken, map[string]any{"name": "standard-server", "body": templateBody})
+
+	for _, absent := range []string{"/archive", "/restore"} {
+		status, raw := h.adminJSON(t, h.adminToken, http.MethodPost, "/api/v1/templates/absent"+absent, nil)
+		if status != http.StatusNotFound {
+			t.Fatalf("%s against a name nobody stored: %d %s", absent, status, raw)
+		}
+	}
+
+	status, raw := h.adminJSON(t, h.adminToken, http.MethodPost,
+		"/api/v1/templates/standard-server/restore", nil)
+	if status != http.StatusConflict || !strings.Contains(string(raw), "not_archived") {
+		t.Fatalf("restoring a live template: %d %s", status, raw)
+	}
+
+	// The first archival succeeds; the second is a conflict rather than a second success, in that
+	// order, because the order is the property.
+	for _, want := range []int{http.StatusOK, http.StatusConflict} {
+		status, raw := h.adminJSON(t, h.adminToken, http.MethodPost,
+			"/api/v1/templates/standard-server/archive", nil)
+		if status != want {
+			t.Fatalf("archiving answered %d, want %d: %s", status, want, raw)
+		}
+		if want == http.StatusConflict && !strings.Contains(string(raw), "archived_template") {
+			t.Fatalf("the second archival did not say why: %s", raw)
+		}
+	}
+}
+
+// archiveOnRedemption is a store that withdraws one template the instant an enrolment token is spent.
+//
+// It stands in for the operator who presses Archive while a machine is enrolling. That interleaving
+// has no other seam: the enrolment resolves the template, issues a certificate and redeems the token as
+// three separate transactions, so the write that matters has to land from inside the request rather
+// than before or after it.
+type archiveOnRedemption struct {
+	// Store is the real store; only the redemption is decorated.
+	store.Store
+
+	// name is the template withdrawn as the token is spent.
+	name string
+}
+
+// In returns a scoped handle that archives the template as it consumes a token.
+func (s archiveOnRedemption) In(tenant store.TenantID) store.Scoped {
+	return archiveOnRedemptionScoped{Scoped: s.Store.In(tenant), name: s.name}
+}
+
+// archiveOnRedemptionScoped is one tenant's handle on archiveOnRedemption.
+type archiveOnRedemptionScoped struct {
+	// Scoped is the real handle; every method but the redemption is its own.
+	store.Scoped
+
+	// name is the template withdrawn as the token is spent.
+	name string
+}
+
+// ConsumeEnrollmentToken redeems the token and then archives the template, in that order.
+//
+// The order is the whole point: the archival commits after the redemption that proved this enrolment
+// is the one taking place, which is exactly the interleaving the re-check in the handler exists for.
+func (s archiveOnRedemptionScoped) ConsumeEnrollmentToken(ctx context.Context, hash, hostID string,
+	now time.Time) (store.EnrollmentToken, error) {
+
+	token, err := s.Scoped.ConsumeEnrollmentToken(ctx, hash, hostID, now)
+	if err != nil {
+		return token, err
+	}
+	if archiveErr := s.ArchiveTemplate(ctx, store.TemplateArchival{
+		Name: s.name, ArchivedAt: now, ArchivedBy: "test:racer",
+	}); archiveErr != nil {
+		return token, archiveErr
+	}
+	return token, nil
+}
+
+// TestATemplateArchivedMidEnrolmentIsNotIssued closes the gap between the two checks.
+//
+// The early check runs before the certificate is issued, so that a refusal leaves the token usable;
+// that is the right place for it and it cannot also be the last word, because redemption — the moment
+// this enrolment becomes the one that happened — comes afterwards. An archival landing in between would
+// otherwise hand a machine the template the fleet had just retired, while the operator who pressed
+// Archive was told it had worked.
+//
+// What the refusal must leave behind is nothing: no host, no recorded certificate, and a message saying
+// the token is spent rather than one the operator has to decode on a retry.
+func TestATemplateArchivedMidEnrolmentIsNotIssued(t *testing.T) {
+	h := newHarness(t, func(real store.Store) store.Store {
+		return archiveOnRedemption{Store: real, name: "standard-server"}
+	})
+	signature := h.saveSignedTemplate(t, "standard-server", "#cloud-config\nhostname: bootstrapped\n")
+
+	status, _, raw := h.enrollDirect(t, protocol.EnrollRequest{
+		Token: h.issueBootstrapToken(t, "standard-server"), Hostname: "web-01",
+		RequestedBootstrap: "standard-server",
+	})
+	if status != http.StatusConflict || !strings.Contains(string(raw), "archived_template") {
+		t.Fatalf("a template archived mid-enrolment was not refused: %d %s", status, raw)
+	}
+	if strings.Contains(string(raw), signature) {
+		t.Fatalf("the refusal handed over the signature: %s", raw)
+	}
+	if !strings.Contains(string(raw), "has been spent") {
+		t.Fatalf("the refusal does not say the token is spent: %s", raw)
+	}
+
+	hosts, err := h.scoped().ListHosts(context.Background())
+	if err != nil {
+		t.Fatalf("listing hosts: %v", err)
+	}
+	if len(hosts) != 0 {
+		t.Fatalf("the refused enrolment left a host behind: %+v", hosts)
 	}
 }

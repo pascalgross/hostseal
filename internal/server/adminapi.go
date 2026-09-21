@@ -387,6 +387,14 @@ func (s *Server) checkBootstrapIsIssuable(w http.ResponseWriter, r *http.Request
 	if name == "" {
 		return true
 	}
+	if !s.templateIsLive(w, r, who, name) {
+		// An archived template is not issuable, so a token naming one is a token that will be refused
+		// at the enrolment it was minted for — and refused on the machine, at the worst moment to find
+		// out. Checked here as well as there, because a refusal an operator meets while minting is one
+		// they can act on.
+		return false
+	}
+
 	record, err := who.Store.GetTemplateVersion(r.Context(), name, 0)
 	switch {
 	case errors.Is(err, store.ErrNotFound):

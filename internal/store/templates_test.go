@@ -68,7 +68,7 @@ func TestTemplateListingShowsTheLatestVersionPerName(t *testing.T) {
 			}
 		}
 
-		listed, err := tenant.ListTemplates(ctx)
+		listed, err := tenant.ListTemplates(ctx, false)
 		if err != nil {
 			t.Fatalf("listing: %v", err)
 		}
@@ -102,6 +102,176 @@ func TestTemplateLookupMissesAreErrNotFound(t *testing.T) {
 		}
 		if _, err := tenant.GetTemplateVersion(ctx, "standard-server", 7); !errors.Is(err, ErrNotFound) {
 			t.Fatalf("a missing version returned %v", err)
+		}
+	})
+}
+
+// TestArchivingWithdrawsANameAndKeepsEveryVersion is the central property of archiving.
+//
+// It is why archiving exists rather than a delete. An operator retiring a template wants the name out
+// of use; a host that was bootstrapped from it still has a record naming a version, and docs/SECURITY.md
+// §7 says that record has to resolve to the bytes that ran. Both halves are asserted here, because
+// either one alone is a different feature: hiding without keeping is a delete with extra steps, and
+// keeping without hiding is what the page already did.
+func TestArchivingWithdrawsANameAndKeepsEveryVersion(t *testing.T) {
+	eachStore(t, func(t *testing.T, s Store) {
+		ctx := context.Background()
+		tenant := testTenant(t, s, "alpha", ApprovalNone)
+
+		for _, sealed := range []string{"v1", "v2"} {
+			if _, err := tenant.CreateTemplateVersion(ctx, TemplateVersion{
+				Name: "standard-server", BodySealed: []byte(sealed),
+				CreatedAt: time.Now().UTC(), CreatedBy: "test:alice",
+			}); err != nil {
+				t.Fatalf("saving %s: %v", sealed, err)
+			}
+		}
+
+		at := time.Now().UTC().Truncate(time.Second)
+		if err := tenant.ArchiveTemplate(ctx, TemplateArchival{
+			Name: "standard-server", ArchivedAt: at, ArchivedBy: "test:bob",
+		}); err != nil {
+			t.Fatalf("archiving: %v", err)
+		}
+
+		// Gone from the listing an operator reads every day.
+		listed, err := tenant.ListTemplates(ctx, false)
+		if err != nil {
+			t.Fatalf("listing: %v", err)
+		}
+		if len(listed) != 0 {
+			t.Fatalf("an archived template is still in the default listing: %+v", listed)
+		}
+
+		// Present, and marked, when asked for — otherwise nobody could restore it.
+		withArchived, err := tenant.ListTemplates(ctx, true)
+		if err != nil {
+			t.Fatalf("listing with archived: %v", err)
+		}
+		if len(withArchived) != 1 || !withArchived[0].Archived ||
+			withArchived[0].ArchivedBy != "test:bob" {
+			t.Fatalf("the archived template is not listed as archived: %+v", withArchived)
+		}
+		if !withArchived[0].ArchivedAt.Equal(at) {
+			t.Errorf("archived at %v, want %v", withArchived[0].ArchivedAt, at)
+		}
+		if withArchived[0].LatestVersion != 2 {
+			t.Errorf("the summary lost its version number: %+v", withArchived[0])
+		}
+
+		// And every version still resolves, which is the half a delete could not offer.
+		for version, want := range map[int]string{1: "v1", 2: "v2"} {
+			got, err := tenant.GetTemplateVersion(ctx, "standard-server", version)
+			if err != nil || string(got.BodySealed) != want {
+				t.Fatalf("version %d of an archived template: %+v, %v", version, got, err)
+			}
+		}
+		revisions, err := tenant.ListTemplateVersions(ctx, "standard-server")
+		if err != nil || len(revisions) != 2 {
+			t.Fatalf("the revision history of an archived template: %+v, %v", revisions, err)
+		}
+
+		archival, err := tenant.GetTemplateArchival(ctx, "standard-server")
+		if err != nil || !archival.Archived() || archival.ArchivedBy != "test:bob" {
+			t.Fatalf("reading the archival back: %+v, %v", archival, err)
+		}
+	})
+}
+
+// TestRestoringPutsATemplateBackUnchanged proves the undo is complete and adds nothing.
+//
+// The "unchanged" half matters as much as the "back" half: restoring must not renumber, re-sign or
+// otherwise alter a version, because a restore that produced a v3 would make the archival a way to
+// edit a template after the fact.
+func TestRestoringPutsATemplateBackUnchanged(t *testing.T) {
+	eachStore(t, func(t *testing.T, s Store) {
+		ctx := context.Background()
+		tenant := testTenant(t, s, "alpha", ApprovalNone)
+
+		if _, err := tenant.CreateTemplateVersion(ctx, TemplateVersion{
+			Name: "standard-server", BodySealed: []byte("v1"),
+			Signature: "c2ln", SignerKeyID: "ops-laptop", SignerAlgorithm: "ed25519",
+			CreatedAt: time.Now().UTC(), CreatedBy: "test:alice",
+		}); err != nil {
+			t.Fatalf("saving: %v", err)
+		}
+		if err := tenant.ArchiveTemplate(ctx, TemplateArchival{
+			Name: "standard-server", ArchivedAt: time.Now().UTC(), ArchivedBy: "test:bob",
+		}); err != nil {
+			t.Fatalf("archiving: %v", err)
+		}
+		if err := tenant.RestoreTemplate(ctx, "standard-server"); err != nil {
+			t.Fatalf("restoring: %v", err)
+		}
+
+		listed, err := tenant.ListTemplates(ctx, false)
+		if err != nil {
+			t.Fatalf("listing: %v", err)
+		}
+		if len(listed) != 1 || listed[0].Archived || listed[0].LatestVersion != 1 ||
+			!listed[0].Signed || listed[0].CreatedBy != "test:alice" {
+			t.Fatalf("a restored template came back different: %+v", listed)
+		}
+		if !listed[0].ArchivedAt.IsZero() || listed[0].ArchivedBy != "" {
+			t.Errorf("a restored template still carries an archival: %+v", listed[0])
+		}
+		archival, err := tenant.GetTemplateArchival(ctx, "standard-server")
+		if err != nil || archival.Archived() {
+			t.Fatalf("the archival survived the restore: %+v, %v", archival, err)
+		}
+
+		// A second save still numbers from the history, which is what "nothing was destroyed" means
+		// for the one thing an archival could plausibly have reset.
+		next, err := tenant.CreateTemplateVersion(ctx, TemplateVersion{
+			Name: "standard-server", BodySealed: []byte("v2"),
+			CreatedAt: time.Now().UTC(), CreatedBy: "test:alice",
+		})
+		if err != nil || next != 2 {
+			t.Fatalf("the version after a restore was numbered %d: %v", next, err)
+		}
+	})
+}
+
+// TestArchivingRefusesTheStatesItIsAlreadyIn pins the two sentinels handlers map to 404 and 409.
+//
+// They are told apart deliberately. A client acting on a listing it read a minute ago has to learn
+// that it was stale rather than be told its request succeeded, because "archive" and "restore" are
+// each other's undo and a silent no-op is how two operators end up disagreeing about which.
+func TestArchivingRefusesTheStatesItIsAlreadyIn(t *testing.T) {
+	eachStore(t, func(t *testing.T, s Store) {
+		ctx := context.Background()
+		tenant := testTenant(t, s, "alpha", ApprovalNone)
+
+		archival := TemplateArchival{
+			Name: "absent", ArchivedAt: time.Now().UTC(), ArchivedBy: "test:alice",
+		}
+		if err := tenant.ArchiveTemplate(ctx, archival); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("archiving a name nobody stored returned %v", err)
+		}
+		if err := tenant.RestoreTemplate(ctx, "absent"); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("restoring a name nobody stored returned %v", err)
+		}
+		// And a name with no versions reads as live rather than as an error, because that is what
+		// every template that was never archived reads as.
+		if a, err := tenant.GetTemplateArchival(ctx, "absent"); err != nil || a.Archived() {
+			t.Fatalf("an absent template's archival: %+v, %v", a, err)
+		}
+
+		if _, err := tenant.CreateTemplateVersion(ctx, TemplateVersion{
+			Name: "standard-server", BodySealed: []byte("v1"), CreatedAt: time.Now().UTC(),
+		}); err != nil {
+			t.Fatalf("saving: %v", err)
+		}
+		if err := tenant.RestoreTemplate(ctx, "standard-server"); !errors.Is(err, ErrConflict) {
+			t.Fatalf("restoring a live template returned %v", err)
+		}
+
+		archival.Name = "standard-server"
+		if err := tenant.ArchiveTemplate(ctx, archival); err != nil {
+			t.Fatalf("archiving: %v", err)
+		}
+		if err := tenant.ArchiveTemplate(ctx, archival); !errors.Is(err, ErrConflict) {
+			t.Fatalf("archiving an archived template returned %v", err)
 		}
 	})
 }

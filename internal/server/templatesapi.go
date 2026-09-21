@@ -69,6 +69,15 @@ type templateSummaryView struct {
 
 	// SignerAlgorithm is that signature's algorithm, empty when unsigned.
 	SignerAlgorithm string `json:"signerAlgorithm,omitempty"`
+
+	// Archived reports whether the name has been withdrawn from use.
+	Archived bool `json:"archived"`
+
+	// ArchivedAt is when it was withdrawn, absent while it is live.
+	ArchivedAt *time.Time `json:"archivedAt,omitempty"`
+
+	// ArchivedBy is the operator who withdrew it, absent while it is live.
+	ArchivedBy string `json:"archivedBy,omitempty"`
 }
 
 // templateView is one template version in full, body included.
@@ -109,11 +118,53 @@ type templateView struct {
 	// Warnings are the secret shapes found in the body, consequence spelled out. Warnings, never
 	// refusals — see internal/provision.
 	Warnings []string `json:"warnings"`
+
+	// Archived reports whether the name has been withdrawn from use.
+	//
+	// On the version as well as on the listing, because this is the response behind the pane an
+	// operator reads a body in: a withdrawn template is still readable there — that is the whole
+	// point of archiving rather than deleting — and the reader has to be told which of the two they
+	// are looking at before they render it and find out.
+	Archived bool `json:"archived"`
+
+	// ArchivedAt is when it was withdrawn, absent while it is live.
+	ArchivedAt *time.Time `json:"archivedAt,omitempty"`
+
+	// ArchivedBy is the operator who withdrew it, absent while it is live.
+	ArchivedBy string `json:"archivedBy,omitempty"`
+}
+
+// archivedTemplateMessage explains a refusal caused by a withdrawn template name.
+//
+// One sentence in one place, because four requests refuse for this reason — a save, a render, minting a
+// token that names it, and archiving it twice — and an operator who meets two of them should not have to
+// work out that they are the same state. The enrolment path words its own, because the reader there is
+// a machine's operator watching an enrolment fail rather than somebody looking at this page.
+func archivedTemplateMessage(name string) string {
+	return "the template " + name + " has been archived, so it is no longer issued, rendered or " +
+		"extended. Every stored version stays readable, and restoring the template puts it back into " +
+		"use unchanged."
 }
 
 // handleListTemplates returns one summary per template, newest first.
+//
+// Archived names are left out unless `?include=archived` asks for them. Hidden by default because
+// that is what retiring a template was for; listable on request because a name nobody can list is a
+// name nobody can restore, and a listing that could not show the retired ones would make archiving
+// the deletion it deliberately is not.
 func (s *Server) handleListTemplates(w http.ResponseWriter, r *http.Request, who operator) {
-	summaries, err := who.Store.ListTemplates(r.Context())
+	includeArchived := false
+	switch r.URL.Query().Get("include") {
+	case "":
+	case "archived":
+		includeArchived = true
+	default:
+		writeError(w, http.StatusBadRequest, "malformed",
+			"the only supported value for include is `archived`")
+		return
+	}
+
+	summaries, err := who.Store.ListTemplates(r.Context(), includeArchived)
 	if err != nil {
 		slog.Error("could not list templates", "error", err)
 		writeError(w, http.StatusInternalServerError, "internal", "could not read the templates")
@@ -121,7 +172,7 @@ func (s *Server) handleListTemplates(w http.ResponseWriter, r *http.Request, who
 	}
 	views := make([]templateSummaryView, 0, len(summaries))
 	for _, t := range summaries {
-		views = append(views, templateSummaryView{
+		view := templateSummaryView{
 			Name:            t.Name,
 			LatestVersion:   t.LatestVersion,
 			CreatedAt:       t.CreatedAt,
@@ -129,7 +180,14 @@ func (s *Server) handleListTemplates(w http.ResponseWriter, r *http.Request, who
 			Signed:          t.Signed,
 			SignerKeyID:     t.SignerKeyID,
 			SignerAlgorithm: t.SignerAlgorithm,
-		})
+			Archived:        t.Archived,
+			ArchivedBy:      t.ArchivedBy,
+		}
+		if t.Archived {
+			at := t.ArchivedAt
+			view.ArchivedAt = &at
+		}
+		views = append(views, view)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"templates": views})
 }
@@ -166,6 +224,12 @@ func (s *Server) handleCreateTemplate(w http.ResponseWriter, r *http.Request, wh
 	}
 	if err := validateTemplateSignature(req); err != nil {
 		writeError(w, http.StatusBadRequest, "malformed", err.Error())
+		return
+	}
+	if !s.templateIsLive(w, r, who, req.Name) {
+		// Refused rather than silently reviving the name. An operator typing a name that was retired
+		// last quarter is either continuing work somebody deliberately stopped or has picked a name
+		// that is no longer free; both are worth one sentence before a v9 appears under it.
 		return
 	}
 
@@ -284,8 +348,17 @@ func (s *Server) handleGetTemplate(w http.ResponseWriter, r *http.Request, who o
 		return
 	}
 
-	noStore(w)
-	writeJSON(w, http.StatusOK, templateView{
+	// Read, never refused: a version of an archived template is exactly what somebody resolving a
+	// host's bootstrap record needs, and withholding it would be the deletion this whole design is
+	// avoiding. The state is reported instead, so the pane can say so.
+	archival, err := who.Store.GetTemplateArchival(r.Context(), record.Name)
+	if err != nil {
+		slog.Error("could not read a template's archival", "error", err, "template", record.Name)
+		writeError(w, http.StatusInternalServerError, "internal", "could not read the template")
+		return
+	}
+
+	view := templateView{
 		Name:            record.Name,
 		Version:         record.Version,
 		Body:            string(body),
@@ -296,7 +369,108 @@ func (s *Server) handleGetTemplate(w http.ResponseWriter, r *http.Request, who o
 		CreatedBy:       record.CreatedBy,
 		Placeholders:    provision.Placeholders(string(body)),
 		Warnings:        warningsOrEmpty(provision.Warnings(string(body))),
+		Archived:        archival.Archived(),
+		ArchivedBy:      archival.ArchivedBy,
+	}
+	if archival.Archived() {
+		at := archival.ArchivedAt
+		view.ArchivedAt = &at
+	}
+
+	noStore(w)
+	writeJSON(w, http.StatusOK, view)
+}
+
+// handleArchiveTemplate withdraws a template name from use.
+//
+// This is what the UI's missing delete button became, and the difference is not cosmetic. A template
+// version is permanent because a host's Tier 2 bootstrap record names one — docs/SECURITY.md §7 — so
+// there is no endpoint here that destroys one and there is not going to be. What an operator retiring a
+// template actually wants is for nobody to use it again, and that is what this does: the name leaves
+// the listing, refuses new versions, cannot be named by a new enrolment token, cannot be rendered, and
+// is refused at enrolment. Every version stays readable, and restoring changes it all back.
+//
+// It is an operator action like any other, and it authorises nothing on any machine: the effect of
+// archiving is entirely subtractive — a control plane that archived every template in a fleet would
+// have stopped bootstraps and reached no enrolled host at all.
+func (s *Server) handleArchiveTemplate(w http.ResponseWriter, r *http.Request, who operator) {
+	name := r.PathValue("name")
+	archival := store.TemplateArchival{
+		Name:       name,
+		ArchivedAt: time.Now().UTC(),
+		ArchivedBy: who.Principal(),
+	}
+	err := who.Store.ArchiveTemplate(r.Context(), archival)
+	switch {
+	case errors.Is(err, store.ErrNotFound):
+		writeError(w, http.StatusNotFound, "not_found", "no such template")
+		return
+	case errors.Is(err, store.ErrConflict):
+		writeError(w, http.StatusConflict, "archived_template", archivedTemplateMessage(name))
+		return
+	case err != nil:
+		slog.Error("could not archive a template", "error", err, "template", name)
+		writeError(w, http.StatusInternalServerError, "internal", "could not archive the template")
+		return
+	}
+
+	slog.Info("template archived",
+		"template", name, "tenant", who.Store.Tenant(), "operator", who.Principal())
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"name":       name,
+		"archived":   true,
+		"archivedAt": archival.ArchivedAt,
+		"archivedBy": archival.ArchivedBy,
 	})
+}
+
+// handleRestoreTemplate puts an archived template name back into use.
+//
+// Restoring is not an approval of anything and grants nothing the name did not have before: a restored
+// template is issuable at enrolment only under the conditions that already governed it — a signature
+// this control plane cannot produce, and a token minted naming it. Undoing an archival can therefore
+// never be the step that lets something reach a host.
+func (s *Server) handleRestoreTemplate(w http.ResponseWriter, r *http.Request, who operator) {
+	name := r.PathValue("name")
+	err := who.Store.RestoreTemplate(r.Context(), name)
+	switch {
+	case errors.Is(err, store.ErrNotFound):
+		writeError(w, http.StatusNotFound, "not_found", "no such template")
+		return
+	case errors.Is(err, store.ErrConflict):
+		writeError(w, http.StatusConflict, "not_archived",
+			"the template "+name+" is not archived, so there is nothing to restore")
+		return
+	case err != nil:
+		slog.Error("could not restore a template", "error", err, "template", name)
+		writeError(w, http.StatusInternalServerError, "internal", "could not restore the template")
+		return
+	}
+
+	slog.Info("template restored",
+		"template", name, "tenant", who.Store.Tenant(), "operator", who.Principal())
+
+	writeJSON(w, http.StatusOK, map[string]any{"name": name, "archived": false})
+}
+
+// templateIsLive reports whether a template name may still be used, answering the caller if not.
+//
+// One helper rather than the same four lines at each site, and it returns the refusal already written
+// for the same reason checkBootstrapIsIssuable does: a caller that forgot to return after a refusal
+// would write a second response body over the first.
+func (s *Server) templateIsLive(w http.ResponseWriter, r *http.Request, who operator, name string) bool {
+	archival, err := who.Store.GetTemplateArchival(r.Context(), name)
+	if err != nil {
+		slog.Error("could not read a template's archival", "error", err, "template", name)
+		writeError(w, http.StatusInternalServerError, "internal", "could not read the template")
+		return false
+	}
+	if archival.Archived() {
+		writeError(w, http.StatusConflict, "archived_template", archivedTemplateMessage(name))
+		return false
+	}
+	return true
 }
 
 // templateRevisionView is one stored revision as the listing renders it.
@@ -415,6 +589,11 @@ func (s *Server) handleRenderTemplate(w http.ResponseWriter, r *http.Request, wh
 	if err != nil {
 		slog.Error("could not read a template", "error", err)
 		writeError(w, http.StatusInternalServerError, "internal", "could not read the template")
+		return
+	}
+	if !s.templateIsLive(w, r, who, record.Name) {
+		// Before anything is minted, like every other refusal on this path: a render of a retired
+		// template would otherwise leave a live enrolment token behind for user-data nobody receives.
 		return
 	}
 	body, err := s.cfg.TemplateKey.Open(record.BodySealed)

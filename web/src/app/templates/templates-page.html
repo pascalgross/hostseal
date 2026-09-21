@@ -20,6 +20,13 @@
       host, before enrolment or after it.
     </p>
     <p class="m-0 mt-2 text-sm opacity-80 max-w-3xl">
+      Nothing here can be deleted, and that is the storage model rather than a missing button: a
+      host's bootstrap record names a version — "web-07 was bootstrapped with standard-server v3" —
+      and has to resolve to the bytes that actually ran. Retiring a template archives it instead. The
+      name is withdrawn from use and leaves this list; every version stays readable, and restoring it
+      is one click.
+    </p>
+    <p class="m-0 mt-2 text-sm opacity-80 max-w-3xl">
       <a [href]="examplesUrl" target="_blank" rel="noopener noreferrer"
          class="inline-flex items-center gap-1">
         Worked examples
@@ -32,12 +39,26 @@
 
   <div class="grid gap-6 lg:grid-cols-2">
     <section>
-      <h2 class="text-lg font-medium mt-0 mb-3">Stored</h2>
+      <div class="flex items-baseline gap-3 mb-3">
+        <h2 class="text-lg font-medium mt-0 mb-0">Stored</h2>
+        <span class="flex-1"></span>
+        <button mat-button type="button" (click)="toggleArchived()"
+                [matTooltip]="'Archived templates are withdrawn from use and hidden here. Nothing about them is deleted: every version stays readable, because a host&rsquo;s bootstrap record names one.'">
+          {{ showArchived() ? 'Hide archived' : 'Show archived' }}
+        </button>
+      </div>
 
       @if (list.length === 0) {
         <mat-card>
           <mat-card-content class="!pt-6 text-sm opacity-80">
-            <p class="m-0">Nothing stored yet. Write one below.</p>
+            @if (showArchived()) {
+              <p class="m-0">Nothing stored yet. Write one below.</p>
+            } @else {
+              <p class="m-0">
+                Nothing in use. Write one below — or show the archived ones, if a template was
+                retired rather than never written.
+              </p>
+            }
           </mat-card-content>
         </mat-card>
       } @else {
@@ -51,6 +72,13 @@
                     v{{ template.latestVersion }} · stored by {{ template.createdBy || 'unknown' }}
                   </p>
                 </div>
+
+                @if (template.archived) {
+                  <span class="text-xs opacity-70"
+                        [matTooltip]="'Withdrawn from use by ' + (template.archivedBy || 'an unnamed operator') + '. It is refused for new versions, renders, enrolment tokens and enrolments until it is restored; every stored version stays readable.'">
+                    archived
+                  </span>
+                }
 
                 @if (template.signed) {
                   <span class="text-xs text-hostseal-ok"
@@ -135,12 +163,68 @@
 
     <section>
       @if (opened(); as record) {
-        <div class="flex items-baseline gap-3 mb-3">
+        <div class="flex flex-wrap items-baseline gap-3 mb-3">
           <h2 class="text-lg font-medium m-0">{{ record.name }} v{{ record.version }}</h2>
           <span class="flex-1"></span>
-          <button mat-button (click)="editOpen()">Edit as new version</button>
+          @if (record.archived) {
+            <button mat-button [disabled]="busy()" (click)="restore()">Restore</button>
+          } @else {
+            <button mat-button (click)="editOpen()">Edit as new version</button>
+            <button mat-button type="button" (click)="toggleArchiveConfirmation()">
+              {{ confirmingArchive() ? 'Keep it' : 'Archive' }}
+            </button>
+          }
           <button mat-button (click)="close()">Close</button>
         </div>
+
+        @if (record.archived) {
+          <mat-card class="mb-4">
+            <mat-card-content class="!pt-6 flex items-start gap-3">
+              <mat-icon class="opacity-70">inventory_2</mat-icon>
+              <div class="text-sm">
+                <p class="m-0 font-medium">
+                  Archived on {{ withdrawn(record.archivedAt) }} by
+                  {{ record.archivedBy || 'an unnamed operator' }}.
+                </p>
+                <p class="m-0 mt-2 opacity-80">
+                  New versions, renders, enrolment tokens naming it and enrolments requesting it are
+                  all refused while it is archived. Nothing was deleted: this body and every other
+                  version stay exactly as they were, which is what lets a host's bootstrap record
+                  still resolve to the bytes that ran on it. Restoring puts the name back with no
+                  other change.
+                </p>
+              </div>
+            </mat-card-content>
+          </mat-card>
+        }
+
+        @if (confirmingArchive() && !record.archived) {
+          <mat-card class="mb-4">
+            <mat-card-content class="!pt-6 flex flex-col gap-3 text-sm">
+              <p class="m-0">
+                Archiving withdraws the name <strong>{{ record.name }}</strong> from use. It leaves
+                this list, and new versions, renders, enrolment tokens naming it and enrolments
+                requesting it are refused — including tokens minted before now, which is the case
+                worth pausing over: a machine being built with one fails its enrolment loudly rather
+                than coming up unconfigured.
+              </p>
+              <p class="m-0 opacity-80">
+                Nothing is deleted, and there is no control here that could delete it. Every version
+                stays readable, because a host's bootstrap record names one and has to resolve to the
+                bytes that actually ran. Restoring is one click and changes nothing else.
+              </p>
+              @if (actionError()) {
+                <p class="m-0 text-hostseal-bad">{{ actionError() }}</p>
+              }
+              <div class="flex gap-2">
+                <button mat-flat-button [disabled]="busy()" (click)="archive()">
+                  Archive {{ record.name }}
+                </button>
+                <button mat-button type="button" (click)="toggleArchiveConfirmation()">Keep it</button>
+              </div>
+            </mat-card-content>
+          </mat-card>
+        }
 
         @if (record.warnings.length > 0) {
           <mat-card class="mb-4">

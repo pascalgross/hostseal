@@ -99,7 +99,12 @@ type harness struct {
 func (h *harness) scoped() store.Scoped { return h.store.In(h.tenant) }
 
 // newHarness starts a control plane for one test.
-func newHarness(t *testing.T) *harness {
+//
+// A test may pass a decorator, which wraps the store the server is given while the harness keeps
+// reaching the memory store underneath for fixtures and assertions. It exists for the races that have
+// no other seam: a handler that reads a row, acts, and reads again can only be shown to handle a write
+// that lands in between if something can perform that write from inside the request.
+func newHarness(t *testing.T, decorate ...func(store.Store) store.Store) *harness {
 	t.Helper()
 
 	dir := t.TempDir()
@@ -167,11 +172,16 @@ func newHarness(t *testing.T) *harness {
 		t.Fatalf("preparing the template key: %v", err)
 	}
 
+	var backing store.Store = memory
+	for _, wrap := range decorate {
+		backing = wrap(backing)
+	}
+
 	srv, err := server.New(server.Config{
 		Authority:        authority,
 		OnlineKey:        online,
 		TemplateKey:      templateKey,
-		Store:            memory,
+		Store:            backing,
 		Auth:             auth.Chain(provider, accounts, apiTokens),
 		Accounts:         accounts,
 		HeartbeatSeconds: 60,
