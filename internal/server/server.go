@@ -364,6 +364,10 @@ func (s *Server) routes() {
 	s.route(http.MethodGet, "/api/v1/templates/{name}/versions",
 		s.requireOperator(s.handleListTemplateVersions))
 	s.route(http.MethodPost, "/api/v1/templates/{name}/render", s.requireOperator(s.handleRenderTemplate))
+	// Retiring a template is archive and restore, and there is deliberately no DELETE beside them: a
+	// version is what a host's bootstrap record names, so the control plane has no way to destroy one.
+	s.route(http.MethodPost, "/api/v1/templates/{name}/archive", s.requireOperator(s.handleArchiveTemplate))
+	s.route(http.MethodPost, "/api/v1/templates/{name}/restore", s.requireOperator(s.handleRestoreTemplate))
 	s.route(http.MethodGet, "/api/v1/events", s.requireOperator(s.handleListEvents))
 	s.route(http.MethodGet, "/api/v1/events/stream", s.requireOperator(s.handleEventStream))
 	s.route(http.MethodGet, "/api/v1/services/failed", s.requireOperator(s.handleFailedServices))

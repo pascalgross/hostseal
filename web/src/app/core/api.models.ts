@@ -786,6 +786,22 @@ export interface TemplateSummary {
    * this control plane cannot produce that signature.
    */
   signed: boolean;
+
+  /**
+   * Whether the name has been withdrawn from use.
+   *
+   * There is no delete: a host's bootstrap record names a version and has to resolve to the bytes
+   * that ran, so retiring a template withdraws the *name* — out of this listing, refused for new
+   * versions, renders, tokens and enrolments — while every version stays readable. Restoring undoes
+   * exactly that and nothing else.
+   */
+  archived: boolean;
+
+  /** When it was withdrawn, absent while it is live. */
+  archivedAt?: string;
+
+  /** Which operator withdrew it, absent while it is live. */
+  archivedBy?: string;
 }
 
 /** The response of `GET /api/v1/templates`. */
@@ -828,6 +844,36 @@ export interface TemplateVersion {
    * control that blocked the save would only teach operators to route around it.
    */
   warnings: string[];
+
+  /**
+   * Whether the template's name has been withdrawn from use.
+   *
+   * Reported on a version because reading one is never refused — resolving a host's bootstrap record
+   * is the whole reason archiving is not a delete — so the pane showing the body is where a reader
+   * has to be told which of the two states they are looking at.
+   */
+  archived: boolean;
+
+  /** When it was withdrawn, absent while it is live. */
+  archivedAt?: string;
+
+  /** Which operator withdrew it, absent while it is live. */
+  archivedBy?: string;
+}
+
+/** What an archive or restore answers with. */
+export interface TemplateArchivalResult {
+  /** The template acted on. */
+  name: string;
+
+  /** Its state afterwards: true after an archive, false after a restore. */
+  archived: boolean;
+
+  /** When it was withdrawn, absent after a restore. */
+  archivedAt?: string;
+
+  /** Which operator withdrew it, absent after a restore. */
+  archivedBy?: string;
 }
 
 /**

@@ -148,8 +148,10 @@ operator did not name. `version` is informational and deliberately outside the s
 record on the host keeps the body verbatim, so what ran stays knowable from the host alone even if a
 control plane relabelled its version numbers. The server issues a template only when the enrolment
 token was minted naming it, and refuses the enrolment — before consuming the token — when the named
-template is missing or unsigned, because an agent that asked and silently received nothing must not
-proceed as though something had been applied.
+template is missing, unsigned, or archived, because an agent that asked and silently received nothing
+must not proceed as though something had been applied. Archived means withdrawn from use by an
+operator of that fleet: a template is never deleted, because the record this response leaves on the
+host names a version, so retiring one stops it being issued and leaves every version readable.
 
 The agent MUST verify the signature against a key present in the host's **existing**
 `/etc/hostseal/trusted-signers` before doing anything with `body`; MUST refuse if `name` is not the name
@@ -169,7 +171,7 @@ approves another.
 | `400` | Malformed body or CSR |
 | `401` | Token unknown, expired, or already used |
 | `403` | `host_limit_reached` — the fleet is at its host limit; `tenant_suspended` — the fleet is suspended. Neither consumes the token, with one exception: when two machines contend for a fleet's last slot the loser is refused by the atomic check, which happens after redemption, and its message says the token was spent |
-| `409` | A host with this `machineIdHash` is already enrolled |
+| `409` | A host with this `machineIdHash` is already enrolled; or the requested bootstrap cannot be issued — `no_such_template`, `unsigned_template`, `archived_template`. None of these consumes the token |
 | `429` | Rate limited; honour `Retry-After` |
 
 ## 4. `POST /agent/v1/heartbeat`

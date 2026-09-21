@@ -300,6 +300,26 @@ func (s *Server) resolveBootstrap(w http.ResponseWriter, r *http.Request, tenant
 		writeError(w, http.StatusInternalServerError, "internal", "could not read the template")
 		return nil, false
 	}
+	// Checked here rather than only where a token is minted, and for the reason the signature below is
+	// checked in both places: a token names a template and never a version, so what "the latest version
+	// of this template" is — and whether the name is still in use at all — is decided now, by this read,
+	// and a template retired during a token's lifetime must not still be handed to a machine. The
+	// refusal is loud, like every other one on this path: the agent fails the enrolment rather than
+	// continuing as though a bootstrap had been applied.
+	archival, err := tenant.GetTemplateArchival(r.Context(), requested)
+	if err != nil {
+		slog.Error("could not read a template's archival", "error", err, "template", requested)
+		writeError(w, http.StatusInternalServerError, "internal", "could not read the template")
+		return nil, false
+	}
+	if archival.Archived() {
+		writeError(w, http.StatusConflict, "archived_template",
+			"the template "+requested+" has been archived in this fleet and is no longer issued at "+
+				"enrolment; nothing was applied and the enrolment was refused rather than continuing "+
+				"as though it had been. Restore the template, or mint a token naming one still in use.")
+		return nil, false
+	}
+
 	if !record.Signed() {
 		writeError(w, http.StatusConflict, "unsigned_template",
 			"the latest version of "+requested+" carries no offline signature, and this control plane "+
