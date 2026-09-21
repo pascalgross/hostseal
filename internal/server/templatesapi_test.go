@@ -1009,7 +1009,7 @@ func (s archiveOnRedemptionScoped) ConsumeEnrollmentToken(ctx context.Context, h
 	if err != nil {
 		return token, err
 	}
-	if archiveErr := s.Scoped.ArchiveTemplate(ctx, store.TemplateArchival{
+	if archiveErr := s.ArchiveTemplate(ctx, store.TemplateArchival{
 		Name: s.name, ArchivedAt: now, ArchivedBy: "test:racer",
 	}); archiveErr != nil {
 		return token, archiveErr
