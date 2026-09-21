@@ -90,3 +90,28 @@ body {
 .hostseal-numeric {
   font-variant-numeric: tabular-nums;
 }
+
+// Why every icon in this application needs its flex shrink turned off.
+//
+// Material sets `overflow: hidden` on mat-icon so that an oversized SVG is cropped to the box rather
+// than drawn outside it. That declaration has a second effect nothing about it suggests: a flex item
+// whose overflow is not `visible` has no automatic minimum size, so the 24px width stops being a
+// floor and becomes a starting point the flex algorithm is free to shrink. Every icon here sits in a
+// flex row beside a sentence — the callouts on Services, Alerts, Jobs and Templates are all one icon
+// and one paragraph — and the paragraph's max-content width is a whole sentence on one line, so
+// there is always more to shrink away than the row has room for. The icon collapsed to 10.6px in
+// the Services all-clear and then cropped its own glyph.
+//
+// What makes this worth a comment is that the symptom names the wrong cause. A tick drawn as a bare
+// arc and an envelope drawn as half an envelope look like a missing glyph or a half-built icon set,
+// which is how it was reported — not like a paragraph that took the icon's width.
+//
+// `flex: none` and not a width, because the size is not this rule's business: the inline icons set
+// their own with `!w-4 !h-4`, and the wallboard derives its from the viewport. This holds whatever
+// size each of them asked for. It is the element selector so that it reaches every icon including
+// the ones inside a button, a chip or a menu item, where the same shrink applies and there is even
+// less room. Two rules in wallboard/wallboard.scss already do this locally, which is how the bug was
+// first met; this is the same fix somewhere every icon can reach it.
+mat-icon {
+  flex: none;
+}
