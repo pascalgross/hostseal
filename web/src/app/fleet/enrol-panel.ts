@@ -188,6 +188,18 @@ export class EnrolPanel {
   /** Why the token listing could not be read, empty when it could. */
   protected readonly tokensError = signal('');
 
+  /**
+   * Which read of the token listing is the current one.
+   *
+   * The listing is read on open and again after every mint, and the two can be in flight together:
+   * an operator who opens the panel and mints at once has the first read still on its way when the
+   * second is answered. Without this, the older answer lands last and the token just minted is
+   * missing from the list until the next mint — which is a listing being wrong about the one row the
+   * operator is looking for. Each read takes a number, and an answer to any read but the latest is
+   * dropped.
+   */
+  private tokensRead = 0;
+
   /** The columns of the token listing, in order. */
   protected readonly tokenColumns = ['label', 'group', 'bootstrap', 'created', 'state'];
 
@@ -588,12 +600,20 @@ export class EnrolPanel {
    * been spent by a host that was waiting for it.
    */
   protected loadTokens(): void {
+    const read = ++this.tokensRead;
     this.api.enrolmentTokens().subscribe({
       next: (listing) => {
+        if (read !== this.tokensRead) {
+          return;
+        }
         this.tokens.set(listing.tokens);
         this.tokensError.set('');
       },
-      error: (err: unknown) => this.tokensError.set(describeError(err)),
+      error: (err: unknown) => {
+        if (read === this.tokensRead) {
+          this.tokensError.set(describeError(err));
+        }
+      },
     });
   }
 
@@ -624,24 +644,33 @@ export class EnrolPanel {
    * label says which it was, so the token list can tell a plain token from an armed one.
    */
   protected mint(bootstrap = ''): void {
-    this.busy.set(true);
-    this.mintError.set('');
     const request: CreateEnrolmentTokenRequest = {
       label:
         this.tokenLabel().trim() ||
         (bootstrap ? `from the fleet page, for ${bootstrap}` : 'from the fleet page'),
       group: this.tokenGroup().trim(),
     };
-    // A cleared or half-typed field is not a lifetime this panel should send: zero would arrive as
-    // "use the default", silently, where the operator was in the middle of typing. Only a whole
-    // positive number of hours is a choice.
+    // An empty field is the control plane's default and is sent as nothing. Anything else has to be
+    // a whole positive number of hours, and a value that is not — zero, a negative, a fraction of an
+    // hour, or the NaN a half-typed field reads as — refuses the mint rather than falling back to the
+    // default: the control plane takes a missing lifetime to mean a day, so a token minted against
+    // "0" would be a day-long invitation the operator asked to be no such thing.
     const hours = this.tokenHours();
-    if (hours !== null && Number.isFinite(hours) && hours > 0) {
-      request.ttlSeconds = Math.round(hours * 3600);
+    if (hours !== null) {
+      if (!Number.isInteger(hours) || hours <= 0) {
+        this.mintError.set(
+          'The lifetime has to be a whole number of hours, at least 1. Leave it empty for the ' +
+            "control plane's default.",
+        );
+        return;
+      }
+      request.ttlSeconds = hours * 3600;
     }
     if (bootstrap) {
       request.bootstrap = bootstrap;
     }
+    this.busy.set(true);
+    this.mintError.set('');
     this.api.createEnrolmentToken(request).subscribe({
       next: (token) => {
         this.busy.set(false);

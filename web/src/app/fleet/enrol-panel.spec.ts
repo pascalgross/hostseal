@@ -1,12 +1,13 @@
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { provideZonelessChangeDetection } from '@angular/core';
-import { of } from 'rxjs';
+import { Subject, of } from 'rxjs';
 
 import { ApiService } from '../core/api.service';
 import {
   CreateEnrolmentTokenRequest,
   EnrolmentInstructions,
   EnrolmentTokenSummary,
+  EnrolmentTokensResponse,
   TemplateSummary,
 } from '../core/api.models';
 import { EnrolPanel } from './enrol-panel';
@@ -417,6 +418,79 @@ describe('EnrolPanel', () => {
       { label: 'from the fleet page', group: '' },
       { label: 'web tier', group: 'web-prod', ttlSeconds: 7200 },
     ]);
+  });
+
+  /**
+   * A lifetime that is not a whole positive number of hours refuses the mint.
+   *
+   * The button is not a form submission, so nothing disables it on an invalid field — and the
+   * control plane reads a missing lifetime as its default of a day. A panel that dropped a zero or a
+   * negative and minted anyway would issue a day-long invitation the operator asked to be no such
+   * thing, which is the wrong direction to be wrong in. The empty field stays the default, because
+   * that is what empty means.
+   */
+  it('refuses to mint against a lifetime that is not a whole positive number of hours', () => {
+    const minted: CreateEnrolmentTokenRequest[] = [];
+    const fixture = render(instructions(), 'https://hostseal.example.org/', [], minted);
+    const panel = fixture.componentInstance as unknown as PanelInternals;
+
+    for (const hours of [0, -1, 1.5, Number.NaN]) {
+      panel.tokenHours.set(hours);
+      panel.mint();
+    }
+    fixture.detectChanges();
+
+    expect(minted).toEqual([]);
+    expect(text(fixture.nativeElement)).toContain('whole number of hours');
+
+    panel.tokenHours.set(null);
+    panel.mint();
+    fixture.detectChanges();
+
+    expect(minted).toEqual([{ label: 'from the fleet page', group: '' }]);
+    expect(text(fixture.nativeElement)).not.toContain('whole number of hours');
+  });
+
+  /**
+   * A token listing that answers late does not overwrite one that answered after it.
+   *
+   * The listing is read when the panel opens and again after each mint, and an operator who does
+   * both at once has the first read still in flight when the second is answered. The older answer
+   * arriving last would remove the token just minted from the list until the next mint — a listing
+   * wrong about exactly the row the operator is looking for, with nothing to say so.
+   */
+  it('drops a token listing that is answered after a newer read', () => {
+    const first = new Subject<EnrolmentTokensResponse>();
+    const second = new Subject<EnrolmentTokensResponse>();
+    const answers = [first, second];
+    TestBed.resetTestingModule();
+    TestBed.configureTestingModule({
+      providers: [
+        provideZonelessChangeDetection(),
+        {
+          provide: ApiService,
+          useValue: {
+            enrolment: () => of(instructions()),
+            templates: () => of({ templates: [] }),
+            enrolmentTokens: () => answers.shift()!.asObservable(),
+            createEnrolmentToken: () =>
+              of({ token: 'frr-enrol-abcdef', label: 'x', group: '', expiresAt: '2026-08-29T00:00:00Z' }),
+          } as unknown as ApiService,
+        },
+      ],
+    });
+    const fixture = TestBed.createComponent(EnrolPanel);
+    const panel = fixture.componentInstance as unknown as PanelInternals;
+    panel.pageBase = () => 'https://hostseal.example.org/';
+    fixture.detectChanges();
+    panel.load();
+    panel.mint();
+
+    second.next({ tokens: [tokenRow({ label: 'just minted' })] });
+    first.next({ tokens: [] });
+    fixture.detectChanges();
+
+    expect(text(fixture.nativeElement)).toContain('just minted');
   });
 
   /**
