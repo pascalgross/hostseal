@@ -15,7 +15,8 @@ import (
 //
 // Keeping the difference here rather than in ffi.go is what let Windows be added without a second copy
 // of the ABI: a reviewer comparing the two halves is comparing six lines, not six hundred, and the
-// entry-point table that would be expensive to get wrong has no platform in it at all.
+// entry-point table that would be expensive to get wrong has no platform in it at all. The structure
+// widths and offsets, which do differ, are abi.go's one table rather than a second copy of anything.
 
 // exampleModulePath is the module an error message names when a reference gives none.
 //

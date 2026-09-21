@@ -19,9 +19,14 @@ import (
 //
 // The calls are `windows.LoadLibraryEx` and `GetProcAddress` rather than purego's `Dlopen`, which is
 // POSIX-only; purego's own call layer — the part that turns a C function pointer into a Go function
-// value — supports Windows, so only these three functions are platform-specific. That support is
-// amd64 and arm64, which is what HostSeal builds for Windows; a 32-bit Windows build would fail to
-// compile inside purego rather than silently mis-call a module, which is the right way round.
+// value — supports Windows. That support is amd64 and arm64, which is what HostSeal builds for
+// Windows; a 32-bit Windows build would fail to compile inside purego rather than silently mis-call a
+// module, which is the right way round.
+//
+// This is one of the two files that differ by platform. The other is abi.go's table, and it is the
+// one that matters more: Windows packs Cryptoki structures to one byte and keeps CK_ULONG at four,
+// so a build that shared the Unix widths would load the right library and then mis-read every
+// structure it passed to it.
 
 // exampleModulePath is the module an error message names when a reference gives none.
 //

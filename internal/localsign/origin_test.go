@@ -18,6 +18,14 @@ func TestAnOriginIsNormalisedToWhatABrowserSends(t *testing.T) {
 		"  https://hostseal.example.org  ":  "https://hostseal.example.org",
 		"http://localhost:4200":             "http://localhost:4200",
 		"http://127.0.0.1:4200":             "http://127.0.0.1:4200",
+		// An IPv6 literal keeps its brackets. net/url takes them off and net.JoinHostPort only puts
+		// them back when there is a port, so the no-port case normalised to https://::1 — which a
+		// browser never sends, so the allowlist matched nothing while looking correct in the terminal.
+		"https://[2001:db8::1]":      "https://[2001:db8::1]",
+		"https://[2001:db8::1]:8443": "https://[2001:db8::1]:8443",
+		"https://[2001:db8::1]:443":  "https://[2001:db8::1]",
+		"http://[::1]:4200":          "http://[::1]:4200",
+		"http://[::1]":               "http://[::1]",
 	} {
 		got, err := ValidateOrigin(given)
 		if err != nil {

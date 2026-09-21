@@ -256,3 +256,23 @@ func TestAnExplicitStartIsTheInstantTheValidityRunsFrom(t *testing.T) {
 		t.Errorf("the window is %s wide; --valid-for asked for 30m", got)
 	}
 }
+
+// TestAnExplicitlyZeroValidityIsRefusedRatherThanDefaulted keeps a typed number from meaning its
+// opposite.
+//
+// `signjob.Draft` reads a zero duration as "the caller has no opinion, use an hour", because the
+// caller that leaves it unset is a request over a socket that omitted the field. An operator who typed
+// `--valid-for=0` has an opinion, and it is not an hour — so the command refuses before it reaches the
+// seam where the difference between "unset" and "explicitly none" has already been lost.
+func TestAnExplicitlyZeroValidityIsRefusedRatherThanDefaulted(t *testing.T) {
+	for _, argv := range [][]string{
+		{"--key", "/nonexistent.key", "--host", "01JTESTHOST", "--intent", "host.reboot",
+			"--valid-for", "0"},
+		{"--key", "/nonexistent.key", "--host", "01JTESTHOST", "--intent", "host.reboot",
+			"--valid-for", "-5m"},
+	} {
+		if code := signCommand(argv); code != 2 {
+			t.Errorf("%v exited %d, want 2 — refused before the key is opened", argv, code)
+		}
+	}
+}

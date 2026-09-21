@@ -131,8 +131,8 @@ func open(_ context.Context, ref string, prompt backend.PassphraseFunc) (signing
 	if err != nil {
 		return nil, err
 	}
-	args := ckInitializeArgs{flags: ckfOSLockingOK}
-	if err := check("C_Initialize", mod.initialize(pointerTo(&args))); err != nil {
+	args := encodeInitializeArgs(ckfOSLockingOK)
+	if err := check("C_Initialize", mod.initialize(pointerTo(&args[0]))); err != nil {
 		mod.close()
 		return nil, err
 	}
@@ -230,6 +230,8 @@ func findSlot(mod *module, parsed uri) (ckULong, error) {
 
 	if parsed.slotID >= 0 {
 		for _, slot := range slots {
+			//nolint:gosec // G115: parseURI refuses a slot-id that does not fit this platform's
+			// CK_SLOT_ID, which is what makes this conversion exact rather than merely narrowing.
 			if slot != ckULong(parsed.slotID) {
 				continue
 			}
@@ -438,21 +440,26 @@ func resolveKey(mod *module, session ckULong, parsed uri) (*Signer, error) {
 
 // findOne locates exactly one object of a class matching the reference.
 func findOne(mod *module, session, class ckULong, parsed uri) (ckULong, error) {
-	classValue := class
-	template := []ckAttribute{{
-		kind: ckaClass, value: pointerTo(&classValue), valueLen: ckULong(sizeOfULong),
-	}}
+	// Counted before it is built, because a template is a fixed-width array in the module's own
+	// layout rather than a Go slice that can grow: see the ABI table in abi.go.
+	attributes := 1
 	if parsed.object != "" {
-		label := []byte(parsed.object)
-		template = append(template, ckAttribute{
-			kind: ckaLabel, value: pointerTo(&label[0]), valueLen: ckULong(len(label)),
-		})
+		attributes++
 	}
 	if len(parsed.id) > 0 {
-		id := parsed.id
-		template = append(template, ckAttribute{
-			kind: ckaID, value: pointerTo(&id[0]), valueLen: ckULong(len(id)),
-		})
+		attributes++
+	}
+
+	template := newAttributeTemplate(attributes)
+	next := 0
+	template.set(next, ckaClass, encodeULong(class))
+	next++
+	if parsed.object != "" {
+		template.set(next, ckaLabel, []byte(parsed.object))
+		next++
+	}
+	if len(parsed.id) > 0 {
+		template.set(next, ckaID, parsed.id)
 	}
 
 	handles, err := mod.find(session, template, maxMatches)

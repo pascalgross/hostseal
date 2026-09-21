@@ -58,6 +58,11 @@ type Request struct {
 	NotBefore string
 
 	// ValidFor is how long the signature stays valid, zero for DefaultValidity.
+	//
+	// Zero means the default rather than a window of nothing, because the callers that leave it unset
+	// are the ones that have no opinion — a request over a socket that omitted the field. A caller
+	// that lets a person *type* zero has to refuse it before getting here, where the difference
+	// between "unset" and "explicitly none" still exists: `hostseal sign` does.
 	ValidFor time.Duration
 }
 

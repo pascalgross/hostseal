@@ -85,8 +85,13 @@ func parseURI(ref string) (uri, error) {
 			out.serial = value
 		case "slot-id":
 			n, convErr := strconv.ParseInt(value, 10, 64)
-			if convErr != nil || n < 0 {
-				return uri{}, fmt.Errorf("pkcs11: slot-id must be a non-negative number, not %q", value)
+			if convErr != nil || !slotIDFits(n) {
+				// The upper bound is the platform's own CK_SLOT_ID width — see abi.go, where
+				// CK_ULONG is four bytes on Windows and eight on Unix. A number beyond it is refused
+				// rather than truncated, because a slot id that wrapped would open whichever token is
+				// in the slot it landed on.
+				return uri{}, fmt.Errorf("pkcs11: slot-id must be a non-negative number a slot id can "+
+					"hold, not %q", value)
 			}
 			out.slotID = n
 		case "model", "manufacturer", "type", "object-type", "library-manufacturer",

@@ -52,7 +52,7 @@ func ValidateOrigin(raw string) (string, error) {
 		if !loopbackName(host) {
 			return "", fmt.Errorf("localsign: --origin %q is http and not loopback. An origin that "+
 				"anybody on the network can impersonate is not one to let ask for signatures; use "+
-				"https://%s", raw, host)
+				"https://%s", raw, hostLiteral(host))
 		}
 	default:
 		return "", fmt.Errorf("localsign: --origin %q has scheme %q; a browser origin is http or https",
@@ -67,9 +67,24 @@ func ValidateOrigin(raw string) (string, error) {
 		port = ""
 	}
 	if port == "" {
-		return scheme + "://" + host, nil
+		return scheme + "://" + hostLiteral(host), nil
 	}
 	return scheme + "://" + net.JoinHostPort(host, port), nil
+}
+
+// hostLiteral renders a host the way a URL spells it, which for IPv6 means inside brackets.
+//
+// net/url's Hostname strips the brackets an IPv6 literal is written in, and net.JoinHostPort puts them
+// back — but only when there is a port to join. An origin with no port went through neither, so
+// https://[::1] normalised to https://::1 and then matched nothing: a browser serialises the Origin
+// header with the brackets, so every request from that page was refused while the allowlist looked
+// exactly right in the terminal. The two spellings have to be one before the comparison, and this is
+// the half net.JoinHostPort does not cover.
+func hostLiteral(host string) string {
+	if strings.Contains(host, ":") {
+		return "[" + host + "]"
+	}
+	return host
 }
 
 // ValidateAddr checks that a listen address is loopback.

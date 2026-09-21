@@ -428,3 +428,42 @@ func TestSlotIDAloneAsksTheTokenNothing(t *testing.T) {
 		t.Error("a serial was treated as confirmed by a token that would not report its own")
 	}
 }
+
+// TestASlotIDBeyondTheModulesOwnWidthIsRefused keeps a number from becoming a different number.
+//
+// CK_SLOT_ID is a CK_ULONG, which is four bytes on Windows and eight on Unix — so "a non-negative
+// integer" is not one set but two, and a reference naming a slot beyond the platform's width would
+// wrap rather than fail. Wrapping is the bad way for this to be wrong: 4294967296 becomes 0, which is
+// a real slot, usually with a real token in it, and the operator named neither.
+//
+// Both widths are exercised wherever the test runs, because the one that truncates is the one no
+// machine here can run.
+func TestASlotIDBeyondTheModulesOwnWidthIsRefused(t *testing.T) {
+	original := layout
+	defer func() { layout = original }()
+
+	const module = "?module-path=/usr/lib/softhsm/libsofthsm2.so"
+	const tooBigForWindows = "4294967296"
+
+	layout = unixABI
+	if _, err := parseURI("object=k;slot-id=" + tooBigForWindows + module); err != nil {
+		t.Errorf("a slot id an eight-byte CK_ULONG holds was refused on Unix: %v", err)
+	}
+
+	layout = windowsABI
+	if _, err := parseURI("object=k;slot-id=" + tooBigForWindows + module); err == nil {
+		t.Error("a slot id beyond a four-byte CK_SLOT_ID was accepted on Windows, where it would " +
+			"wrap to slot 0")
+	}
+	if _, err := parseURI("object=k;slot-id=4294967295" + module); err != nil {
+		t.Errorf("the largest slot id Windows can hold was refused: %v", err)
+	}
+
+	// And the shape that was always wrong, on both.
+	for _, abi := range []abiLayout{unixABI, windowsABI} {
+		layout = abi
+		if _, err := parseURI("object=k;slot-id=-1" + module); err == nil {
+			t.Error("a negative slot id was accepted")
+		}
+	}
+}

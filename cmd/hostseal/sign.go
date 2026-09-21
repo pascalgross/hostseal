@@ -76,6 +76,15 @@ func signCommand(argv []string) int {
 		fmt.Fprintln(os.Stderr, "hostseal: --key, --host and --intent are all required")
 		return 2
 	}
+	// Refused here rather than in signjob.Draft, because zero means different things on the two sides
+	// of that seam. A caller over a socket omits the field and means "your default"; an operator who
+	// typed --valid-for=0 asked for a window of nothing, and silently signing for an hour instead
+	// would hand them a signature that outlives what they asked for by an hour.
+	if *validFor <= 0 {
+		fmt.Fprintln(os.Stderr, "hostseal: --valid-for must be positive; it is how long the signature "+
+			"stays usable, and a window of zero is not a thing a host can act on")
+		return 2
+	}
 
 	job, spec, decoded, err := signjob.Draft(signjob.Request{
 		JobID:     *jobID,
