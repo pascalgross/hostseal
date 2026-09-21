@@ -301,12 +301,15 @@ values and the reasoning are in [`SECURITY.md` §3](SECURITY.md#3-the-intent-cat
 ## A host
 
 The interface has this as a panel: **Fleet → Add a host** mints the token, fills in this control plane's
-own address and gives you the three commands with a copy button on each. The token button opens onto
-the signed templates, so **Generate token for …** mints one that names a bootstrap template, and the
-enrolment command then carries `--signers` and `--bootstrap` together — see
+own address and gives you the three commands with a copy button on each. The label, the group and the
+lifetime are fields beside the button, each optional. The token button opens onto the signed templates,
+so **Generate token for …** mints one that names a bootstrap template, and the enrolment command then
+carries `--signers` and `--bootstrap` together — see
 [`SECURITY.md` §7](SECURITY.md#7-provisioning-and-the-enrolment-time-exception) for what the host does
-with them. What follows is the same thing for a script, and the same thing to read when you want to
-know what those commands do.
+with them. Under the steps, the panel lists every token minted in the fleet — never the values, which
+are not stored — with whether each is open, was spent and by which host, or expired unused. What
+follows is the same thing for a script, and the same thing to read when you want to know what those
+commands do.
 
 ```bash
 # On the control plane, or through the web interface:

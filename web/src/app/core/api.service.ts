@@ -13,6 +13,7 @@ import {
   CreateReadJobRequest,
   CreateTemplateRequest,
   CreateEnrolmentTokenRequest,
+  EnrolmentTokensResponse,
   CreateTenantRequest,
   CreateWallboardShareRequest,
   CreateWallboardShareResponse,
@@ -276,6 +277,16 @@ export class ApiService {
    */
   enrolment(): Observable<EnrolmentInstructions> {
     return this.http.get<EnrolmentInstructions>('/api/v1/enrolment', { headers: this.headers() });
+  }
+
+  /**
+   * Lists every enrolment token minted in this fleet, newest first, without the secrets.
+   *
+   * The secrets are not withheld by this client; they do not exist to be sent. Only each token's hash
+   * is stored, so the listing can say what a token was for and whether it is spent, and nothing more.
+   */
+  enrolmentTokens(): Observable<EnrolmentTokensResponse> {
+    return this.http.get<EnrolmentTokensResponse>('/api/v1/tokens', { headers: this.headers() });
   }
 
   /**

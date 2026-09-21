@@ -30,28 +30,44 @@
       plane does not hold. That is the card below.
     </p>
 
-    <div class="flex flex-wrap gap-4 items-baseline">
-      <mat-form-field appearance="outline" class="min-w-64">
-        <mat-label>Host</mat-label>
-        <mat-select [ngModel]="chosenHost()" (ngModelChange)="chosenHost.set($event)">
-          @for (host of hosts(); track host.id) {
-            <mat-option [value]="host.id" [disabled]="host.revoked">
-              {{ host.hostname }}@if (host.revoked) { <span class="opacity-60"> (revoked)</span> }
-            </mat-option>
-          }
-        </mat-select>
-      </mat-form-field>
+    <div class="flex flex-col gap-3">
+      <div class="flex flex-wrap gap-4 items-start">
+        <mat-form-field appearance="outline" class="min-w-64">
+          <mat-label>Host</mat-label>
+          <mat-select [ngModel]="chosenHost()" (ngModelChange)="chosenHost.set($event)">
+            @for (host of hosts(); track host.id) {
+              <mat-option [value]="host.id" [disabled]="host.revoked">
+                {{ host.hostname }}@if (host.revoked) { <span class="opacity-60"> (revoked)</span> }
+              </mat-option>
+            }
+          </mat-select>
+        </mat-form-field>
 
-      <mat-form-field appearance="outline" class="grow min-w-72">
-        <mat-label>Operation</mat-label>
-        <mat-select [ngModel]="chosenIntent()" (ngModelChange)="chosenIntent.set($event)">
-          @for (entry of startableIntents(); track entry.name) {
-            <mat-option [value]="entry.name">{{ entry.name }} — {{ entry.summary }}</mat-option>
-          }
-        </mat-select>
-      </mat-form-field>
+        <mat-form-field appearance="outline" class="grow min-w-72">
+          <mat-label>Operation</mat-label>
+          <mat-select [ngModel]="chosenIntent()" (ngModelChange)="chosenIntent.set($event)">
+            @for (entry of startableIntents(); track entry.name) {
+              <mat-option [value]="entry.name">{{ entry.name }} — {{ entry.summary }}</mat-option>
+            }
+          </mat-select>
+        </mat-form-field>
+      </div>
 
-      <button mat-flat-button [disabled]="!canCreateJob()" (click)="createJob()">Queue it</button>
+      <div class="flex flex-wrap gap-4 items-start">
+        <mat-form-field appearance="outline" class="grow min-w-72">
+          <mat-label>Parameters (JSON)</mat-label>
+          <input matInput autocomplete="off" spellcheck="false"
+                 [ngModel]="readParams()" (ngModelChange)="readParams.set($event)" />
+          <mat-hint>
+            Every operation this card can queue today takes none — leave it as
+            <code>&#123;&#125;</code>. The control plane refuses a field the operation does not know.
+          </mat-hint>
+        </mat-form-field>
+
+        <button mat-flat-button class="mt-2" [disabled]="!canCreateJob()" (click)="createJob()">
+          Queue it
+        </button>
+      </div>
     </div>
 
     @if (actionError()) {

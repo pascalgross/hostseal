@@ -250,6 +250,16 @@ export class JobsList {
   /** Whether the terminal path — the command to copy, the box to paste into — is on screen. */
   protected readonly showTerminalPath = signal(false);
 
+  /**
+   * The parameters for the report form, as JSON text.
+   *
+   * Every operation that form can queue today takes an empty object, and the control plane's decoders
+   * refuse a field none of them knows. The field is here so that an operation which does take
+   * parameters is queued the way everything else is, and so the object is typed rather than assumed;
+   * the hint under it says the current truth so nobody types into it expecting otherwise.
+   */
+  protected readonly readParams = signal('{}');
+
   /** Whether the form has enough to submit. */
   protected readonly canCreateJob = computed(
     () => this.chosenHost().length > 0 && this.chosenIntent().length > 0 && !this.busy(),
@@ -328,10 +338,23 @@ export class JobsList {
 
   /** Queues the job the form describes. */
   protected createJob(): void {
+    // Parsed here first, so that a stray comma is a message under the field rather than a request
+    // the control plane refuses with a message about the wire format.
+    let params: Record<string, unknown>;
+    try {
+      params = JSON.parse(this.readParams().trim() || '{}') as Record<string, unknown>;
+    } catch {
+      this.actionError.set('The parameters are not valid JSON. An empty object is {} .');
+      return;
+    }
+    if (params === null || typeof params !== 'object' || Array.isArray(params)) {
+      this.actionError.set('The parameters must be a JSON object. An empty one is {} .');
+      return;
+    }
     this.busy.set(true);
     this.actionError.set('');
     this.api
-      .createReadJob({ hostId: this.chosenHost(), intent: this.chosenIntent(), params: {} })
+      .createReadJob({ hostId: this.chosenHost(), intent: this.chosenIntent(), params })
       .subscribe({
         next: () => {
           this.busy.set(false);

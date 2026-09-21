@@ -6,6 +6,7 @@ import { ApiService } from '../core/api.service';
 import {
   CreateEnrolmentTokenRequest,
   EnrolmentInstructions,
+  EnrolmentTokenSummary,
   TemplateSummary,
 } from '../core/api.models';
 import { EnrolPanel } from './enrol-panel';
@@ -39,6 +40,31 @@ function template(partial: Partial<TemplateSummary>): TemplateSummary {
   };
 }
 
+/** Builds one row of the token listing, so a spec names only what it is about. */
+function tokenRow(partial: Partial<EnrolmentTokenSummary>): EnrolmentTokenSummary {
+  return {
+    label: 'web tier',
+    group: '',
+    createdAt: '2026-09-20T09:00:00Z',
+    expiresAt: '2026-09-21T09:00:00Z',
+    consumed: false,
+    usable: true,
+    ...partial,
+  };
+}
+
+/** The one call of the control plane a spec counts, on the stub `render` installs. */
+interface TokenReads {
+  /** Reads the token listing. */
+  enrolmentTokens: () => unknown;
+}
+
+/** The half of a signal these specs use: the ability to put a value into a form field. */
+interface Writable<T> {
+  /** Sets the field, as the markup's two-way binding does. */
+  set(value: T): void;
+}
+
 /**
  * The protected members these specs reach for, named so the casts below stay readable.
  *
@@ -57,6 +83,15 @@ interface PanelInternals {
 
   /** Switches the commands to a platform, which the two buttons above them do. */
   showPlatform(platform: 'linux' | 'windows'): void;
+
+  /** What the next token will be called. */
+  tokenLabel: Writable<string>;
+
+  /** The group a host enrolled with the next token joins. */
+  tokenGroup: Writable<string>;
+
+  /** How many hours the next token stays redeemable. */
+  tokenHours: Writable<number | null>;
 }
 
 /**
@@ -71,6 +106,7 @@ function render(
   pageBase = 'https://hostseal.example.org/',
   templates: TemplateSummary[] = [],
   minted: CreateEnrolmentTokenRequest[] = [],
+  tokens: EnrolmentTokenSummary[] = [],
 ): ComponentFixture<EnrolPanel> {
   TestBed.resetTestingModule();
   TestBed.configureTestingModule({
@@ -81,6 +117,7 @@ function render(
         useValue: {
           enrolment: () => of(details),
           templates: () => of({ templates }),
+          enrolmentTokens: () => of({ tokens }),
           createEnrolmentToken: (request: CreateEnrolmentTokenRequest) => {
             minted.push(request);
             return of({
@@ -353,6 +390,81 @@ describe('EnrolPanel', () => {
     const rendered = text(fixture.nativeElement);
     expect(rendered).not.toContain('--bootstrap');
     expect(rendered).toContain('a Windows host cannot apply one');
+  });
+
+  /**
+   * The label, the group and the lifetime reach the control plane when they are filled in, and the
+   * request carries no lifetime when the field is empty.
+   *
+   * The empty case is the one worth asserting: a lifetime of zero is what a cleared number field
+   * reads as, and the control plane takes zero to mean "your default" — so sending it would be
+   * harmless today and wrong the day the server starts refusing a zero. Omitting it is the honest
+   * reading of an empty field. Hours are sent as seconds because that is the unit of the API, and the
+   * conversion is the kind of arithmetic that is wrong by a factor of sixty without anybody noticing.
+   */
+  it('sends the label, the group and the lifetime, and omits a lifetime that was not chosen', () => {
+    const minted: CreateEnrolmentTokenRequest[] = [];
+    const fixture = render(instructions(), 'https://hostseal.example.org/', [], minted);
+    const panel = fixture.componentInstance as unknown as PanelInternals;
+
+    panel.mint();
+    panel.tokenLabel.set(' web tier ');
+    panel.tokenGroup.set('web-prod');
+    panel.tokenHours.set(2);
+    panel.mint();
+
+    expect(minted).toEqual([
+      { label: 'from the fleet page', group: '' },
+      { label: 'web tier', group: 'web-prod', ttlSeconds: 7200 },
+    ]);
+  });
+
+  /**
+   * The listing says where every token stands, in three states rather than two booleans.
+   *
+   * "Not usable" on its own conflates the token a host redeemed with the one nobody ever did, and
+   * they are different findings: one is a machine in the fleet and the other is an invitation that
+   * sat open for a day. The listing also has to name the host that spent a token, because that is
+   * the one line of provenance an enrolment leaves behind.
+   */
+  it('lists every token with its label, its template and where it stands', () => {
+    const rendered = text(
+      render(instructions(), 'https://hostseal.example.org/', [], [], [
+        tokenRow({ label: 'web tier', group: 'web-prod', bootstrap: 'baseline' }),
+        tokenRow({ label: 'db-07', consumed: true, consumedByHost: 'db-07', usable: false }),
+        tokenRow({ label: 'forgotten', usable: false }),
+      ]).nativeElement,
+    );
+
+    expect(rendered).toContain('web tier');
+    expect(rendered).toContain('web-prod');
+    expect(rendered).toContain('baseline');
+    expect(rendered).toContain('open');
+    expect(rendered).toContain('used by db-07');
+    expect(rendered).toContain('expired unused');
+  });
+
+  /**
+   * Minting a token re-reads the listing, so the row for it appears without a reload.
+   *
+   * Re-read rather than appended, because only the control plane knows whether a token minted a
+   * moment ago has already been spent by a host that was waiting for it — and a listing that showed
+   * "open" for a token in use would be wrong about the one thing it exists to say.
+   */
+  it('re-reads the listing after minting', () => {
+    let reads = 0;
+    const fixture = render(instructions());
+    const api = TestBed.inject(ApiService) as unknown as TokenReads;
+    const original = api.enrolmentTokens;
+    api.enrolmentTokens = () => {
+      reads += 1;
+      return original();
+    };
+
+    (fixture.componentInstance as unknown as PanelInternals).mint();
+    fixture.detectChanges();
+
+    expect(reads).toBe(1);
   });
 
   /**

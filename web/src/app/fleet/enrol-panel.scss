@@ -50,3 +50,19 @@ p {
     margin: 0;
   }
 }
+
+// The token listing, on the card's own background.
+//
+// Material paints a table its surface colour, which inside this card is a second, slightly different
+// grey that reads as a box within a box. The listing is part of the panel rather than a panel of its
+// own, so it takes the card's colour; the cells are top-aligned because the state column is two lines
+// where the others are one.
+.hostseal-tokens {
+  background: transparent;
+
+  td,
+  th {
+    vertical-align: top;
+    padding-block: 0.5rem;
+  }
+}

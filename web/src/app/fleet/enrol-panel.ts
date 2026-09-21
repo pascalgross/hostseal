@@ -1,13 +1,23 @@
 import { Component, computed, inject, signal } from '@angular/core';
 import { DatePipe } from '@angular/common';
+import { FormsModule } from '@angular/forms';
 import { MatButtonModule } from '@angular/material/button';
 import { MatCardModule } from '@angular/material/card';
+import { MatFormFieldModule } from '@angular/material/form-field';
 import { MatIconModule } from '@angular/material/icon';
+import { MatInputModule } from '@angular/material/input';
 import { MatMenuModule } from '@angular/material/menu';
 import { MatProgressBarModule } from '@angular/material/progress-bar';
+import { MatTableModule } from '@angular/material/table';
 import { MatTooltipModule } from '@angular/material/tooltip';
 
-import { EnrolmentInstructions, MintedEnrolmentToken, TemplateSummary } from '../core/api.models';
+import {
+  CreateEnrolmentTokenRequest,
+  EnrolmentInstructions,
+  EnrolmentTokenSummary,
+  MintedEnrolmentToken,
+  TemplateSummary,
+} from '../core/api.models';
 import { ApiService } from '../core/api.service';
 import { describeError } from '../core/errors';
 
@@ -114,11 +124,15 @@ const windowsCLI = `& '${windowsInstallDir}\\hostseal.exe'`;
   selector: 'hostseal-enrol-panel',
   imports: [
     DatePipe,
+    FormsModule,
     MatButtonModule,
     MatCardModule,
+    MatFormFieldModule,
     MatIconModule,
+    MatInputModule,
     MatMenuModule,
     MatProgressBarModule,
+    MatTableModule,
     MatTooltipModule,
   ],
   templateUrl: './enrol-panel.html',
@@ -139,6 +153,43 @@ export class EnrolPanel {
 
   /** Why minting failed, empty when it did not. */
   protected readonly mintError = signal('');
+
+  /**
+   * What the next token will be called, empty for the panel's own default.
+   *
+   * A label is how a token is told apart in the list below once the value itself is gone, and "from
+   * the fleet page" told nothing apart. Optional rather than required, because a fleet with one
+   * operator adding one host has nothing to tell apart and should not be asked to invent a name.
+   */
+  protected readonly tokenLabel = signal('');
+
+  /** The fleet group a host enrolled with the next token joins, empty for none. */
+  protected readonly tokenGroup = signal('');
+
+  /**
+   * How many hours the next token stays redeemable, empty for the control plane's default of a day.
+   *
+   * Hours rather than seconds because that is the unit the decision is made in: an hour for a machine
+   * being built now, a week for one arriving with the next delivery. A token that is minted, not
+   * spent and not yet expired is a standing invitation into the fleet, and the length of that
+   * invitation should be the operator's choice rather than the server's.
+   */
+  protected readonly tokenHours = signal<number | null>(null);
+
+  /**
+   * Every token minted in this fleet, newest first, null until the listing has answered.
+   *
+   * The value of a token exists only where it was copied, so this cannot show one — and does not
+   * need to. What it answers is which invitations into the fleet are still open, which were spent
+   * and by whom, and which expired unused; before it, the only way to know was a database query.
+   */
+  protected readonly tokens = signal<EnrolmentTokenSummary[] | null>(null);
+
+  /** Why the token listing could not be read, empty when it could. */
+  protected readonly tokensError = signal('');
+
+  /** The columns of the token listing, in order. */
+  protected readonly tokenColumns = ['label', 'group', 'bootstrap', 'created', 'state'];
 
   /**
    * The templates a token could name, null until the listing has answered.
@@ -525,6 +576,39 @@ export class EnrolPanel {
       // must not read as broken because a page about templates could not be loaded.
       error: () => this.templates.set(null),
     });
+    this.loadTokens();
+  }
+
+  /**
+   * Reads the token listing, on open and again after every mint.
+   *
+   * Re-read rather than appended to from the mint response, because the response and the listing
+   * are different views of the same row — the response carries the secret and the listing carries
+   * the state — and only the control plane knows whether a token minted a moment ago has already
+   * been spent by a host that was waiting for it.
+   */
+  protected loadTokens(): void {
+    this.api.enrolmentTokens().subscribe({
+      next: (listing) => {
+        this.tokens.set(listing.tokens);
+        this.tokensError.set('');
+      },
+      error: (err: unknown) => this.tokensError.set(describeError(err)),
+    });
+  }
+
+  /**
+   * One phrase for where a token stands: open, spent, or expired unused.
+   *
+   * Three states rather than the two booleans the control plane sends, because "not usable" alone
+   * conflates the token a host redeemed with the one nobody ever did, and those are different
+   * findings — one is a host in the fleet, the other is an invitation that was left open for a day.
+   */
+  protected tokenState(token: EnrolmentTokenSummary): string {
+    if (token.consumed) {
+      return token.consumedByHost ? `used by ${token.consumedByHost}` : 'used';
+    }
+    return token.usable ? 'open' : 'expired unused';
   }
 
   /**
@@ -542,12 +626,27 @@ export class EnrolPanel {
   protected mint(bootstrap = ''): void {
     this.busy.set(true);
     this.mintError.set('');
-    const label = bootstrap ? `from the fleet page, for ${bootstrap}` : 'from the fleet page';
-    const request = bootstrap ? { label, group: '', bootstrap } : { label, group: '' };
+    const request: CreateEnrolmentTokenRequest = {
+      label:
+        this.tokenLabel().trim() ||
+        (bootstrap ? `from the fleet page, for ${bootstrap}` : 'from the fleet page'),
+      group: this.tokenGroup().trim(),
+    };
+    // A cleared or half-typed field is not a lifetime this panel should send: zero would arrive as
+    // "use the default", silently, where the operator was in the middle of typing. Only a whole
+    // positive number of hours is a choice.
+    const hours = this.tokenHours();
+    if (hours !== null && Number.isFinite(hours) && hours > 0) {
+      request.ttlSeconds = Math.round(hours * 3600);
+    }
+    if (bootstrap) {
+      request.bootstrap = bootstrap;
+    }
     this.api.createEnrolmentToken(request).subscribe({
       next: (token) => {
         this.busy.set(false);
         this.minted.set(token);
+        this.loadTokens();
       },
       error: (err: unknown) => {
         this.busy.set(false);
