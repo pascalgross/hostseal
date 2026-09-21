@@ -1,0 +1,18 @@
+:host {
+  display: block;
+}
+
+// Why the paragraphs have a measure and nothing else here does.
+//
+// The panel is as wide as the fleet table beneath it, because a card that stops halfway across a page
+// the table crosses entirely reads as a mistake rather than as a decision. The commands earn that
+// width: a keyring line, a curl piped into install and an enrolment command are long, and every pixel
+// is one fewer wrapped line in something somebody is about to paste into a root shell.
+//
+// The sentences do not earn it. Prose set across the whole page is prose nobody reaches the end of, so
+// the paragraphs keep a reading measure while the <pre> blocks beside them take everything. This is a
+// rule rather than a class on each of nine paragraphs because it is one decision, and nine copies of
+// it is nine chances for the tenth paragraph to be added without it.
+p {
+  max-width: 48rem;
+}
