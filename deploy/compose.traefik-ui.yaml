@@ -30,7 +30,6 @@ services:
       traefik.http.routers.hostseal-ui.rule: Host(`${HOSTSEAL_UI_HOSTNAME:?set HOSTSEAL_UI_HOSTNAME in .env}`)
       traefik.http.routers.hostseal-ui.entrypoints: ${HOSTSEAL_TRAEFIK_ENTRYPOINT:-websecure}
       traefik.http.routers.hostseal-ui.tls: "true"
-      traefik.http.routers.hostseal-ui.middlewares: hostseal-ui-signin@docker
       # Whatever your Traefik calls its ACME resolver. Traefik obtains and renews the certificate for
       # this hostname on its own, and nothing about it reaches hostseal-server — which is the reason to
       # prefer this shape over feeding a certificate into the container: the server reads --tls-cert
@@ -95,6 +94,28 @@ services:
       # turning a shared bucket into no bucket at all, and an unauthenticated password-guessing channel
       # with a fresh allowance per forged value.
       #
+      # It rides a router of its own, and that is the half this used to get wrong. The middleware hung
+      # on the hostseal-ui router, whose rule is `Host(...)` and nothing else — so a limit written for
+      # one password form applied to every request on the hostname: the HTML, each Angular chunk, every
+      # asset and the whole of /api/v1. Twenty in a burst is roughly what one cold load of the interface
+      # costs, so the allowance was gone before an operator had done anything, and what they got
+      # afterwards was one request every six seconds. Traefik's refusal carries no problem document, so
+      # the interface could render it only as "The control plane returned 429." — a 429 the control
+      # plane never sent, about a limit it does not have.
+      #
+      # Matching POST /api/v1/session puts the limit back on the derivation it was written for. The
+      # router needs no priority, for the reason the deny router above needs none: its rule is the
+      # hostseal-ui rule plus two further matchers, so it is strictly longer for every hostname there
+      # can ever be. Signing out is a DELETE on the same path and is deliberately outside the match — it
+      # costs a row update, not an Argon2id derivation, and an operator who cannot sign out is an
+      # operator whose session stays valid.
+      traefik.http.routers.hostseal-ui-signin.rule: Host(`${HOSTSEAL_UI_HOSTNAME:?set HOSTSEAL_UI_HOSTNAME in .env}`) && Path(`/api/v1/session`) && Method(`POST`)
+      traefik.http.routers.hostseal-ui-signin.entrypoints: ${HOSTSEAL_TRAEFIK_ENTRYPOINT:-websecure}
+      traefik.http.routers.hostseal-ui-signin.tls: "true"
+      traefik.http.routers.hostseal-ui-signin.tls.certresolver: ${HOSTSEAL_CERT_RESOLVER:-letsencrypt}
+      traefik.http.routers.hostseal-ui-signin.service: hostseal-ui
+      traefik.http.routers.hostseal-ui-signin.middlewares: hostseal-ui-signin@docker
+
       # `sourcecriterion` is the default, the request's real source address as Traefik sees it. Twenty
       # in a burst and ten a minute sustained: a person who has forgotten which password they used will
       # not notice, and a script will.
