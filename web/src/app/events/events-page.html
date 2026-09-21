@@ -77,8 +77,8 @@
 </div>
 
 @if (shown().length === 0) {
-  <mat-card class="max-w-2xl">
-    <mat-card-content class="!pt-6 text-sm opacity-80">
+  <mat-card>
+    <mat-card-content class="!pt-6 text-sm opacity-80 max-w-3xl">
       @if (kind()) {
         <p class="m-0">Nothing of this kind has happened yet.</p>
       } @else {

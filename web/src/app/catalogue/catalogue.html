@@ -56,17 +56,17 @@
     <tr mat-row *matRowDef="let row; columns: columns"></tr>
   </table>
 
-  <mat-card class="max-w-3xl">
+  <mat-card>
     <mat-card-header>
       <mat-card-title>Permanently refused</mat-card-title>
     </mat-card-header>
     <mat-card-content class="!pt-4">
-      <p class="text-sm opacity-80 mt-0">
+      <p class="text-sm opacity-80 mt-0 max-w-3xl">
         These will never be added, each for a reason written down in <code>docs/SECURITY.md</code>. In an
         open-source project the request arrives eventually, usually from somebody with a real problem,
         and the answer needs to be a document rather than an argument.
       </p>
-      <ul class="m-0 pl-5 hostseal-numeric text-sm">
+      <ul class="m-0 pl-5 list-disc hostseal-numeric text-sm">
         @for (name of refused(); track name) {
           <li>{{ name }}</li>
         }

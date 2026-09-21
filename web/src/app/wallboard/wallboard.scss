@@ -381,7 +381,15 @@
 // The share panel, in operator mode only, under the board rather than beside it: the board is a
 // screen-shaped thing and cropping it to make room for a form would misrepresent what a television
 // will show.
+//
+// It is a sibling of the board and not a child, so it inherits none of the board's own inset, and it
+// used to start a full `2.5vw` to the left of everything above it — a panel that looked dropped onto
+// the page rather than placed under the board. The inset is written as the same `2.5vw` the board pads itself
+// with rather than a length that currently matches it: the board's is a share of the viewport while
+// the column around both is capped, so any fixed value here agrees at one window width and at no
+// other. The panel keeps its own narrower width, because what is in it is a link and a short form and
+// the board is the only thing on this page that wants to be as wide as a wall.
 .wb__shares {
   display: block;
-  padding: 1.5rem 0 0;
+  padding: 1.5rem 2.5vw 0;
 }

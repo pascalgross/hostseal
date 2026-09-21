@@ -120,6 +120,7 @@ const windowsCLI = `& '${windowsInstallDir}\\hostseal.exe'`;
     MatTooltipModule,
   ],
   templateUrl: './enrol-panel.html',
+  styleUrl: './enrol-panel.scss',
 })
 export class EnrolPanel {
   /** Talks to the control plane. */

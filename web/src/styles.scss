@@ -90,3 +90,50 @@ body {
 .hostseal-numeric {
   font-variant-numeric: tabular-nums;
 }
+
+// Why every icon in this application needs its flex shrink turned off.
+//
+// Material sets `overflow: hidden` on mat-icon so that an oversized SVG is cropped to the box rather
+// than drawn outside it. That declaration has a second effect nothing about it suggests: a flex item
+// whose overflow is not `visible` has no automatic minimum size, so the 24px width stops being a
+// floor and becomes a starting point the flex algorithm is free to shrink. Every icon here sits in a
+// flex row beside a sentence — the callouts on Services, Alerts, Jobs and Templates are all one icon
+// and one paragraph — and the paragraph's max-content width is a whole sentence on one line, so
+// there is always more to shrink away than the row has room for. The icon collapsed to 10.6px in
+// the Services all-clear and then cropped its own glyph.
+//
+// What makes this worth a comment is that the symptom names the wrong cause. A tick drawn as a bare
+// arc and an envelope drawn as half an envelope look like a missing glyph or a half-built icon set,
+// which is how it was reported — not like a paragraph that took the icon's width.
+//
+// `flex: none` and not a width, because the size is not this rule's business: the inline icons set
+// their own with `!w-4 !h-4`, and the wallboard derives its from the viewport. This holds whatever
+// size each of them asked for. It is the element selector so that it reaches every icon including
+// the ones inside a button, a chip or a menu item, where the same shrink applies and there is even
+// less room. Two rules in wallboard/wallboard.scss already do this locally, which is how the bug was
+// first met; this is the same fix somewhere every icon can reach it.
+mat-icon {
+  flex: none;
+}
+
+// A chip in a table cell, put on the line of the text it labels.
+//
+// The tier on Operations, the state on Jobs and the status on Fleet are each a chip in one column of a
+// table whose every other cell is top-aligned text. A chip is 32px tall and centres its label, so the
+// label landed six pixels below the name it belongs to — little enough to look like nothing in
+// particular and enough that a row reads as two.
+//
+// `vertical-align` cannot fix it, which is worth knowing before trying: the chip is the only thing in
+// its cell, so it is what sizes the line box it would be aligned inside, and `middle` and `top` both
+// measured identically to no rule at all. What is left is to move the box, by half the difference
+// between the chip's height and the line its label occupies — which puts the pill astride the row's
+// first line and the label on that line's baseline.
+//
+// Written as the subtraction it is rather than as the -6px it currently comes to. `1lh` is the chip's
+// own line height, which Material sets from its label token, and the height is a second token; a theme
+// that changes either keeps this correct instead of inheriting a number that used to be right. It was
+// measured at 0px of offset for a 20px, 32px and 40px chip. Scoped to a table cell, because a chip set
+// in a card lays its own chips out and wants none of this.
+td mat-chip {
+  margin-top: calc((1lh - var(--mat-chip-container-height, 2rem)) / 2);
+}
