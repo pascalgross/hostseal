@@ -202,10 +202,20 @@ would answer 401 there anyway — terminated TLS carries no client certificate �
 path to the agent API is one where no later middleware or header can become one. Point agents at the
 passthrough name.
 
-And it rate limits this router — twenty in a burst, ten a minute sustained — which is the sign-in limit
-that the control plane cannot apply for itself here. `hostseal-server` keys its own limiter on the peer
-address, which on this leg is Traefik, so every operator would share one bucket; the middleware keys on
-the address Traefik sees, which is the client's.
+And it rate limits signing in — twenty in a burst, ten a minute sustained — which is the limit the
+control plane cannot apply for itself here. `hostseal-server` keys its own limiter on the peer address,
+which on this leg is Traefik, so every operator would share one bucket; the middleware keys on the
+address Traefik sees, which is the client's.
+
+**The limit is on a router of its own, matching `POST /api/v1/session` and nothing else.** It used to
+hang on the router that serves the hostname, whose rule is `Host(…)`, and a limit meant for one password
+form then applied to the HTML, every Angular chunk, every asset and the whole of `/api/v1`. One cold
+load of the interface costs about twenty requests, so the burst was spent before an operator had done
+anything and the rest of the session ran at one request every six seconds. The symptom is worth knowing
+because it names the wrong culprit: Traefik's refusal carries no problem document, so the interface
+renders it as `The control plane returned 429.` — every 429 `hostseal-server` writes carries its own
+sentence instead, such as `too many sign-in attempts`. A bare status code in that message means the
+proxy answered, not the control plane.
 
 **It is deliberately not solved by teaching `hostseal-server` to trust `X-Forwarded-For`**, and the reason
 is specific enough to be worth writing down, because trusting it here would be worse than leaving the
