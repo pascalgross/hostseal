@@ -868,6 +868,40 @@ func TestGuaranteeNoManagedHostBinaryLoadsASigningBackend(t *testing.T) {
 	}
 }
 
+// TestGuaranteeNoManagedHostBinaryRegistersALogonEntry keeps the operator's convenience off the fleet.
+//
+// internal/autostart writes a value under HKCU that starts a program when somebody logs in. On the
+// machine it exists for — an operator's own workstation, with the token plugged into it — that is a
+// registry write a person performs on themselves, and `hostseal signer --install` is the whole of its
+// caller. Reachable from the agent it would be something else entirely: a way for a control plane's
+// request to leave a program behind that runs at the next logon on a machine somebody else owns, which
+// is the channel §1 says does not exist, arriving through a door nobody is watching.
+//
+// internal/winapi states "no registry write" as a boundary for the agent's platform surface. This is
+// the same sentence from the other end, about the one package in the tree that does write one.
+func TestGuaranteeNoManagedHostBinaryRegistersALogonEntry(t *testing.T) {
+	const autostartPackage = "github.com/pascalgross/hostseal/internal/autostart"
+
+	root := repoRoot(t)
+	imports := moduleImportGraph(t, root)
+
+	for _, entry := range managedHostBinaries {
+		if _, ok := imports[entry]; !ok {
+			t.Fatalf("%s has no packages; if a binary has moved, move managedHostBinaries with it", entry)
+		}
+		for path, chain := range reachableFrom(imports, entry) {
+			if path == autostartPackage {
+				t.Errorf("%s reaches %s, which registers a program to start at logon.\n"+
+					"  through: %s\n"+
+					"That package belongs to `hostseal signer` on an operator's own machine. An agent "+
+					"that could write a logon entry would be a way to make a managed host run a "+
+					"program of somebody's choosing — see docs/SECURITY.md §1.",
+					entry, path, strings.Join(chain, " → "))
+			}
+		}
+	}
+}
+
 // moduleImportGraph maps each first-party package directory to the packages it imports.
 //
 // Built by parsing rather than by shelling out to `go list`, because a test that ran a program to

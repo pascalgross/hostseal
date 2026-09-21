@@ -153,6 +153,13 @@ YubiKey from there. It changes where the operator stands and nothing else:
   confirmation is — but a signer any page could reach would ask its operator to be the last line of
   defence several times an hour, which is how confirmations stop being read.
 
+`hostseal signer --install` registers that command to start at the operator's next logon, in their own
+interactive session, and `--uninstall` removes it. It is a logon entry and never a service: the
+confirmation above is read from the signer's terminal, and a service has none — one installed that way
+would decline every request it received, and the flag that would make it useful again is the oracle
+this section exists to refuse. What is registered is the same command line, including the same idle
+exit, so an auto-started signer holds a token session for no longer than one started by hand.
+
 The control plane learns nothing new from any of this. It stores a signature it cannot mint, exactly as
 it does for one produced at a terminal.
 
@@ -1202,7 +1209,9 @@ An honest guarantee needs an honest boundary. HostSeal does not protect you from
   with a touch policy a physical touch, before one is produced. That is the same exposure `hostseal
   sign` has always had at the moment it is used, extended to the life of the process, which is why the
   service exits after an idle period, refuses browser origins it was not told about, and cannot be
-  asked to sign anything it did not assemble and display itself. It is not a defence against malware
+  asked to sign anything it did not assemble and display itself. Registering it to start at logon
+  ([§2.3](#23-offline-job-signing)) registers that same idle exit, so it changes when a session opens
+  and not how long one lasts. It is not a defence against malware
   already running as the operator: nothing on that machine can be.
 - **A cloud KMS key the control plane's own identity can reach.** The `kms` backend keeps the private
   key in AWS KMS, Cloud KMS or Key Vault, and the control plane holds nothing — but "holds nothing" is

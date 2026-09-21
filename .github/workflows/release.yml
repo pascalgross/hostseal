@@ -126,6 +126,17 @@ jobs:
           # the host and a machine without it can never enrol.
           make windows VERSION="${{ steps.version.outputs.version }}" COMMIT="$(git rev-parse --short HEAD)"
 
+          # The operator's CLI, for the machine that holds the signing key rather than for a managed
+          # host. It was built above for both architectures and hashed into SHA256SUMS, and then not
+          # attached to anything — so the only way to obtain `hostseal sign` or `hostseal signer` was to
+          # install the agent .deb on your own workstation, which enables and starts an agent service
+          # there. Under a name that says which platform it is for, next to the archive that carries
+          # the same binary for the different job of enrolling a host.
+          for arch in amd64 arm64; do
+            cp "dist/$arch/hostseal" "dist/hostseal-linux-$arch"
+          done
+          make windows-cli VERSION="${{ steps.version.outputs.version }}" COMMIT="$(git rev-parse --short HEAD)"
+
           # Written to a temporary file and moved into place: `find … | tee dist/SHA256SUMS` creates
           # the file before find has finished walking, so it lists itself with a checksum of nothing.
           find dist -type f -print0 | xargs -0 sha256sum > "$RUNNER_TEMP/SHA256SUMS"
@@ -155,6 +166,9 @@ jobs:
             dist/amd64/*
             dist/arm64/*
             dist/hostseal-agent-windows-amd64.zip
+            dist/hostseal-windows-amd64.zip
+            dist/hostseal-linux-amd64
+            dist/hostseal-linux-arm64
 
   publish:
     name: Publish
@@ -246,6 +260,9 @@ jobs:
           files: |
             dist/packages/*.deb
             dist/hostseal-agent-windows-amd64.zip
+            dist/hostseal-windows-amd64.zip
+            dist/hostseal-linux-amd64
+            dist/hostseal-linux-arm64
             dist/SHA256SUMS
             apt-repository.tar.gz
           generate_release_notes: true
@@ -275,6 +292,21 @@ jobs:
             A Windows host is read-only: inventory, services, pending updates and reboot state. It
             applies no updates and reboots nothing, by design rather than by omission -- see
             `docs/SECURITY.md` section 12.
+
+            ### The operator's CLI
+
+            `hostseal` is the tool an operator runs on their **own** machine: it signs destructive jobs
+            and bootstrap templates with a key the control plane does not hold, and `hostseal signer`
+            answers the web interface over loopback so a YubiKey can be used from the browser.
+
+            `hostseal-linux-amd64`, `hostseal-linux-arm64` and `hostseal-windows-amd64.zip` are
+            attached. It is not a service and installs nothing; `hostseal signer --install` registers it
+            to start at your next logon, in your own session, and `--uninstall` removes that again.
+            `docs/INSTALL.md` has the details.
+
+            The agent .deb and the Windows agent archive carry the same binary, because `hostseal
+            enroll` runs on the host being enrolled. Installing either of those on a workstation in
+            order to get the CLI is the wrong way round -- it puts an agent on it.
 
             ## Verifying the build
 

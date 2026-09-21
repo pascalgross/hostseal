@@ -191,7 +191,9 @@ export function describeSignerError(err: unknown, origin: string): string {
       `  hostseal signer --key "pkcs11:token=ops;object=ops-yubikey-1?module-path=<your PKCS#11 module>" \\\n` +
       `      --origin ${origin}\n\n` +
       `On Windows the module is Yubico's libykcs11.dll, installed with the YubiKey Manager or the ` +
-      `PIV Tool; on Linux it is your token's PKCS#11 library. If the signer is running, check that ` +
+      `PIV Tool; on Linux it is your token's PKCS#11 library. Adding --install to that command on ` +
+      `Windows registers it to start at your next logon, in your own session. If the signer is ` +
+      `running, check that ` +
       `it was started with --origin ${origin} — it signs only for the addresses it was told about.`
     );
   }

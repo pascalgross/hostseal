@@ -12,6 +12,13 @@ VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo 0.0.
 COMMIT  ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
 DIST    := dist
 
+# The instant every reproducible artefact is pinned to: whatever the environment set, or this commit's
+# own time. The release workflow exports it for the Go builds, and the archives below need it just as
+# much — a zip entry carries a modification time that -X does not touch, so without this the same commit
+# packed twice produces two different checksums and the SHA256SUMS published beside a release is a
+# number nobody can reproduce.
+SOURCE_DATE_EPOCH ?= $(shell git log -1 --pretty=%ct 2>/dev/null || echo 0)
+
 # -s -w strip the symbol table and DWARF; the agent ships to other people's servers and there is no
 # reason for it to be larger than it needs to be. The version is stamped rather than compiled in from a
 # constant so that a build from a tag and a build from a branch are distinguishable in a heartbeat.
@@ -73,10 +80,36 @@ windows: $(DIST) ## Build the Windows agent and assemble its release archive
 	  go build -trimpath -ldflags '$(LDFLAGS)' -o $(WINDOWS_DIST)/hostseal.exe ./cmd/hostseal
 	cp packaging/windows/Install-HostSealAgent.ps1 $(WINDOWS_DIST)/
 	cp packaging/policy.toml $(WINDOWS_DIST)/
-	@# -X drops the extra fields that carry local timestamps and uids, so two builds of the same
-	@# source produce the same archive rather than one that only differs in metadata.
-	cd $(WINDOWS_DIST) && zip -q -X -r ../hostseal-agent-windows-amd64.zip . && cd -
+	@# Reproducible to the byte, which -X alone does not manage. It drops the extra fields that carry
+	@# uids and high-resolution times, but every entry still keeps a DOS timestamp taken from the staged
+	@# file's mtime and recorded in local time — so an archive packed from one commit differed by when
+	@# and where it was packed, against a SHA256SUMS published as though it could not. Three things fix
+	@# it and all three are needed: the mtimes are pinned to SOURCE_DATE_EPOCH, the archive is written
+	@# with TZ=UTC, and the entries come from a sorted list rather than from whatever order the
+	@# directory happens to be walked in.
+	find $(WINDOWS_DIST) -exec touch -h -d @$(SOURCE_DATE_EPOCH) {} +
+	cd $(WINDOWS_DIST) && find . -type f | LC_ALL=C sort \
+	  | TZ=UTC zip -q -X -@ ../hostseal-agent-windows-amd64.zip && cd -
 	@echo "wrote $(DIST)/hostseal-agent-windows-amd64.zip"
+
+# The operator's CLI on its own, for the machine that holds the signing key.
+#
+# hostseal.exe is in the agent archive as well, because `hostseal enroll` runs on the host — but an
+# operator who only wants to sign is not installing a host. Telling them to download an agent's
+# installer, unpack it and use one file out of five is how a workstation ends up running a service
+# nobody meant to install, and the .ps1 sitting next to it is an invitation to run exactly that.
+WINDOWS_CLI_DIST := $(DIST)/windows-cli
+
+.PHONY: windows-cli
+windows-cli: $(DIST) ## Build the operator's CLI archive for Windows
+	mkdir -p $(WINDOWS_CLI_DIST)
+	GOOS=windows GOARCH=amd64 CGO_ENABLED=0 \
+	  go build -trimpath -ldflags '$(LDFLAGS)' -o $(WINDOWS_CLI_DIST)/hostseal.exe ./cmd/hostseal
+	@# Pinned, UTC and sorted, for the reason the agent archive above spells out.
+	find $(WINDOWS_CLI_DIST) -exec touch -h -d @$(SOURCE_DATE_EPOCH) {} +
+	cd $(WINDOWS_CLI_DIST) && find . -type f | LC_ALL=C sort \
+	  | TZ=UTC zip -q -X -@ ../hostseal-windows-amd64.zip && cd -
+	@echo "wrote $(DIST)/hostseal-windows-amd64.zip"
 
 # The Windows agent must keep cross-compiling, and `make ci` runs on Linux. Compiling it is not a test —
 # nothing here can exercise COM, the SCM or the registry — but a build failure is the one Windows defect
@@ -88,7 +121,7 @@ windows-build: ## Check that the Windows agent still cross-compiles
 	GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -o /dev/null ./cmd/hostseal
 	GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go vet ./cmd/hostseal-agent ./cmd/hostseal-update-scan \
 	  ./internal/winapi ./internal/updatescan ./internal/collect/platform \
-	  ./internal/signing/backend/pkcs11 ./internal/localsign
+	  ./internal/signing/backend/pkcs11 ./internal/localsign ./internal/autostart
 	@# internal/wua is vetted by golangci-lint, which can scope the unsafeptr exclusion to the one
 	@# file that earns it. Raw `go vet` has no such setting, and excluding the whole package here
 	@# would stop checking the two files that do no unsafe work at all.
@@ -193,7 +226,7 @@ golangci: ## golangci-lint, for this platform and for Windows
 WINDOWS_PACKAGES := ./cmd/hostseal/... ./cmd/hostseal-agent/... ./cmd/hostseal-update-scan/... \
   ./internal/winapi/... ./internal/wua/... ./internal/updatescan/... \
   ./internal/collect/... ./internal/agent/... ./internal/policy/... ./internal/run/... \
-  ./internal/signing/... ./internal/localsign/...
+  ./internal/signing/... ./internal/localsign/... ./internal/autostart/...
 
 .PHONY: fmt
 fmt: ## Format Go source
