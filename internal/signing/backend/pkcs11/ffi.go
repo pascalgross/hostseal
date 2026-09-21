@@ -1,9 +1,10 @@
-//go:build !windows
-
 package pkcs11
 
 import (
+	"encoding/binary"
 	"fmt"
+	"math"
+	"runtime"
 	"unsafe"
 
 	"github.com/ebitengine/purego"
@@ -21,19 +22,27 @@ import (
 // at the price of an ABI that the compiler cannot check — which is what the size assertions in
 // pkcs11_test.go are for.
 //
+// Two things in here are not portable, and neither of them is in this file. Loading the library is
+// dl_unix.go and dl_windows.go — `dlopen` against `LoadLibraryEx` — and the widths and offsets of the
+// structures are the table in abi.go, because Cryptoki is packed and 32-bit-CK_ULONG on Windows and
+// neither on Unix. Everything else, including the entry-point indices below, is one copy shared by
+// both: a second copy for Windows would be six hundred lines that can drift for no reason.
+//
+// Nothing here declares a C struct, and that is deliberate rather than stylistic: a Go struct can
+// express neither Windows' one-byte packing nor a field whose width changes per platform, so the four
+// structures this package passes are built and read as bytes through abi.go's table.
+//
 // The library is loaded only when an operator hands `hostseal sign` a pkcs11: reference naming a
 // module. It is emphatically not the plugin loader docs/EXTENDING.md refuses: that refusal is about
 // the *agent*, which loads no code at run time and does not link this package at all — a property
 // TestGuaranteeNoManagedHostBinaryLoadsASigningBackend asserts rather than assumes.
 
-// ckULong is PKCS#11's CK_ULONG.
-//
-// Eight bytes on every platform HostSeal ships to, which is what makes the struct layouts below right.
-// It is a named type so that a plain int cannot be passed where the ABI expects this width.
-type ckULong = uint64
-
 // ckReturn is PKCS#11's CK_RV, the return value of every entry point.
-type ckReturn = uint64
+//
+// The specification defines it as a CK_ULONG, so it is that name rather than a width: four bytes on
+// Windows and eight on Unix. Declaring it eight everywhere would read the upper half of a register the
+// callee never wrote, and every return value would be a different kind of wrong on each call.
+type ckReturn = ckULong
 
 // The PKCS#11 return values this package distinguishes.
 //
@@ -124,62 +133,193 @@ const (
 	fnCount = 68
 )
 
-// functionList mirrors CK_FUNCTION_LIST.
+// pointerSize is the width of a pointer, which is the one thing both ABIs agree about.
+const pointerSize = int(unsafe.Sizeof(uintptr(0)))
+
+// putULong writes a CK_ULONG at an offset, in the module's own width and byte order.
 //
-// The padding is the C compiler's: CK_VERSION is two CK_BYTEs and the pointers that follow are
-// eight-byte aligned, so six bytes sit between them. Getting that wrong shifts every entry point by
-// one and calls C_Finalize where C_Initialize was meant — which is why its size is asserted.
-type functionList struct {
-	// _ is CK_VERSION — two CK_BYTEs the module fills in with the Cryptoki version — and the six
-	// bytes of alignment padding after it. Blank rather than named because this package does not read
-	// the version: a module that answered C_GetFunctionList is one whose list is laid out this way,
-	// and a version check that accepted 2.40 and rejected 3.0 would refuse modules that work.
-	_ [8]byte
-
-	// fn holds the entry points, indexed by the constants above.
-	fn [fnCount]uintptr
+// NativeEndian rather than LittleEndian: the module was compiled for this machine, so the structures
+// it reads are in this machine's order, and naming the order explicitly would be a bug on the one
+// platform where it is not little.
+func putULong(buf []byte, off int, v ckULong) {
+	if layout.ulong == 4 {
+		binary.NativeEndian.PutUint32(buf[off:], uint32(v))
+		return
+	}
+	binary.NativeEndian.PutUint64(buf[off:], uint64(v))
 }
 
-// ckAttribute mirrors CK_ATTRIBUTE: a typed slot that a module reads from or writes into.
-type ckAttribute struct {
-	// kind is the CKA_* attribute type.
-	kind ckULong
-
-	// value points at the caller's buffer, or is nil when asking for a length.
-	value unsafe.Pointer
-
-	// valueLen is the buffer's size going in and the attribute's size coming out.
-	valueLen ckULong
+// readULong reads a CK_ULONG the module wrote.
+func readULong(buf []byte, off int) ckULong {
+	if layout.ulong == 4 {
+		return ckULong(binary.NativeEndian.Uint32(buf[off:]))
+	}
+	return ckULong(binary.NativeEndian.Uint64(buf[off:]))
 }
 
-// ckMechanism mirrors CK_MECHANISM: which operation, and its parameters.
-type ckMechanism struct {
-	// mechanism is the CKM_* identifier.
-	mechanism ckULong
-
-	// parameter and paramLen describe the mechanism's parameter block; both are zero for the two
-	// signature mechanisms this package uses.
-	parameter unsafe.Pointer
-	paramLen  ckULong
-}
-
-// ckInitializeArgs mirrors CK_C_INITIALIZE_ARGS.
+// putPointer writes a pointer at an offset.
 //
-// Only Flags is set. The four mutex callbacks stay nil, which together with CKF_OS_LOCKING_OK tells
-// the module to use the platform's own locking rather than callbacks into a Go runtime that cannot
-// safely provide them.
-type ckInitializeArgs struct {
-	// _ is CreateMutex, DestroyMutex, LockMutex and UnlockMutex: the four optional callbacks, left
-	// nil so the module uses the platform's own locking rather than calling back into a Go runtime
-	// that cannot safely provide them. Blank because leaving them nil is the whole of what this
-	// package does with them, and a named field nothing assigns is a field somebody will assign.
-	_ [4]uintptr
+// The address is written as bytes, which puts it somewhere the garbage collector does not look — so
+// every caller keeps the pointed-at value alive by other means for the length of the call. That is
+// what attributeTemplate.pin is for, and why each of these buffers is handed to exactly one call and
+// then finished with.
+func putPointer(buf []byte, off int, p unsafe.Pointer) {
+	if pointerSize == 4 {
+		binary.NativeEndian.PutUint32(buf[off:], uint32(uintptr(p)))
+		return
+	}
+	binary.NativeEndian.PutUint64(buf[off:], uint64(uintptr(p)))
+}
 
-	// flags carries CKF_OS_LOCKING_OK.
-	flags ckULong
+// readPointer reads a pointer the module wrote.
+func readPointer(buf []byte, off int) uintptr {
+	if pointerSize == 4 {
+		return uintptr(binary.NativeEndian.Uint32(buf[off:]))
+	}
+	return uintptr(binary.NativeEndian.Uint64(buf[off:]))
+}
 
-	// _ is pReserved, which the specification requires to be nil.
-	_ unsafe.Pointer
+// slotIDFits reports whether a number the reference named can be a CK_SLOT_ID on this platform.
+//
+// It exists because CK_ULONG is four bytes on Windows and eight on Unix, so "a non-negative number" is
+// not the same set on the two — and a slot id that silently wrapped to a different slot would open a
+// token the operator did not name. The refusal belongs at the point the reference is parsed, before a
+// PIN is asked for.
+func slotIDFits(n int64) bool {
+	if n < 0 {
+		return false
+	}
+	if layout.ulong == 4 {
+		return n <= math.MaxUint32
+	}
+	return true
+}
+
+// encodeULong renders one CK_ULONG as the bytes an attribute value carries.
+//
+// Attribute values are opaque byte strings to the specification, and a CKA_CLASS is a CK_ULONG inside
+// one — so it is encoded here, in the module's width, rather than passed as a Go value whose size is
+// only right on one platform.
+func encodeULong(v ckULong) []byte {
+	buf := make([]byte, layout.ulong)
+	putULong(buf, 0, v)
+	return buf
+}
+
+// attributeTemplate is a CK_ATTRIBUTE array in the module's own layout.
+//
+// A byte buffer rather than a Go slice of structs, because the Windows layout is packed and Go cannot
+// express packing — and because the fields are different widths on the two platforms, so even an
+// unpacked struct would only be right on one of them.
+type attributeTemplate struct {
+	// raw is the encoded array, which is what the module is given the address of.
+	raw []byte
+
+	// pin holds the Go values raw points into, for as long as the module might read them.
+	//
+	// Writing a pointer into a byte buffer hides it from the garbage collector: as far as the runtime
+	// is concerned, nothing refers to that memory any more. Go does not move heap objects, so an
+	// address that stays alive stays correct — which makes keeping it alive the whole job, and this
+	// slice plus the KeepAlive in done() is how it is done.
+	pin []any
+}
+
+// newAttributeTemplate allocates a template of n attributes, all zeroed.
+func newAttributeTemplate(n int) *attributeTemplate {
+	return &attributeTemplate{raw: make([]byte, n*layout.attributeSize), pin: make([]any, 0, n)}
+}
+
+// set fills one attribute with a type and a value.
+//
+// An empty value writes a nil pointer and a zero length, which is how the specification spells both
+// "this attribute has no value" and "tell me how long it is".
+func (t *attributeTemplate) set(i int, kind ckULong, value []byte) {
+	base := i * layout.attributeSize
+	putULong(t.raw, base+layout.attributeType, kind)
+	if len(value) == 0 {
+		putPointer(t.raw, base+layout.attributeValue, nil)
+		putULong(t.raw, base+layout.attributeLen, 0)
+		return
+	}
+	putPointer(t.raw, base+layout.attributeValue, unsafe.Pointer(&value[0]))
+	putULong(t.raw, base+layout.attributeLen, ckULong(len(value)))
+	t.pin = append(t.pin, value)
+}
+
+// valueLen reads back the length the module reported for one attribute.
+func (t *attributeTemplate) valueLen(i int) ckULong {
+	return readULong(t.raw, i*layout.attributeSize+layout.attributeLen)
+}
+
+// count is how many attributes the template holds, as the entry points want it.
+func (t *attributeTemplate) count() ckULong {
+	return ckULong(len(t.raw) / layout.attributeSize)
+}
+
+// pointer is the address the module reads the template from.
+func (t *attributeTemplate) pointer() unsafe.Pointer {
+	if len(t.raw) == 0 {
+		return nil
+	}
+	return unsafe.Pointer(&t.raw[0])
+}
+
+// done keeps everything the template points at alive until the module has finished with it.
+//
+// Called after each entry point the template is passed to, rather than at the end of a function: the
+// property is that the memory outlives the call, and a KeepAlive placed anywhere later would be
+// claiming something stronger than it can.
+func (t *attributeTemplate) done() {
+	runtime.KeepAlive(t.pin)
+	runtime.KeepAlive(t.raw)
+}
+
+// encodeMechanism renders a CK_MECHANISM with no parameters.
+//
+// Both signature mechanisms this package uses take none: CKM_ECDSA signs the digest it is given and
+// CKM_EDDSA signs the message, and neither has a parameter block. A mechanism that needed one would
+// need its bytes pinned the way an attribute value is.
+func encodeMechanism(mechanism ckULong) []byte {
+	buf := make([]byte, layout.mechanismSize)
+	putULong(buf, layout.mechanismType, mechanism)
+	putPointer(buf, layout.mechanismParam, nil)
+	putULong(buf, layout.mechanismParamLen, 0)
+	return buf
+}
+
+// encodeInitializeArgs renders a CK_C_INITIALIZE_ARGS carrying only its flags.
+//
+// The four mutex callbacks stay nil, which together with CKF_OS_LOCKING_OK tells the module to use the
+// platform's own locking rather than calling back into a Go runtime that cannot safely provide it.
+func encodeInitializeArgs(flags ckULong) []byte {
+	buf := make([]byte, layout.initializeArgsSize)
+	putULong(buf, layout.initializeArgsFlags, flags)
+	return buf
+}
+
+// functionPointers reads the entry points out of a CK_FUNCTION_LIST the module returned.
+//
+// Only as far as the highest index the caller needs, which is the bound the struct-shaped version of
+// this had by accident: a module that implements an older, shorter list is read exactly as far as it
+// goes rather than mapped past its end.
+//
+// The list arrives as a *byte rather than as a uintptr, and that is not a style choice: a uintptr is a
+// number the garbage collector knows nothing about, and converting one back to a pointer is the thing
+// go vet's unsafeptr check exists to ask about. This memory belongs to the module and not to the Go
+// heap, so holding it as a pointer is both honest and free.
+func functionPointers(list *byte, upTo int) []uintptr {
+	if upTo >= fnCount {
+		// Unreachable: every index is a constant in this file, all of them below fnCount. Checked
+		// because the cost of being wrong is reading a vendor library's memory past the end of a
+		// structure, which fails as a crash inside somebody else's code.
+		upTo = fnCount - 1
+	}
+	raw := unsafe.Slice(list, layout.functionListFirst+(upTo+1)*pointerSize)
+	out := make([]uintptr, upTo+1)
+	for i := range out {
+		out[i] = readPointer(raw, layout.functionListFirst+i*pointerSize)
+	}
+	return out
 }
 
 // tokenInfoBytes is the buffer a CK_TOKEN_INFO is read into.
@@ -239,7 +379,8 @@ func (t tokenIdentity) String() string {
 // load time rather than dispatching per call is what keeps every unsafe conversion in this file to the
 // arguments themselves.
 type module struct {
-	// handle is the dlopen handle, closed with the module.
+	// handle is the loaded library's handle — dlopen's on Unix, LoadLibraryEx's on Windows — closed
+	// with the module.
 	handle uintptr
 
 	// path is what was loaded, for error messages that name the module rather than the operation.
@@ -306,26 +447,27 @@ func check(op string, rv ckReturn) error {
 // requires a module to export; the other 67 are pointers inside the struct it fills, and several
 // vendor modules export nothing else.
 func openModule(path string) (*module, error) {
-	handle, err := purego.Dlopen(path, purego.RTLD_NOW|purego.RTLD_LOCAL)
+	handle, err := dlOpen(path)
 	if err != nil {
 		return nil, fmt.Errorf("pkcs11: cannot load the module %s: %w", path, err)
 	}
 
 	var getFunctionList func(list unsafe.Pointer) ckReturn
 	if err := bind(handle, &getFunctionList, "C_GetFunctionList"); err != nil {
-		_ = purego.Dlclose(handle)
+		_ = dlClose(handle)
 		return nil, fmt.Errorf("pkcs11: %s is not a PKCS#11 module: %w", path, err)
 	}
 
-	var list *functionList
+	var list *byte
 	if rv := getFunctionList(unsafe.Pointer(&list)); rv != ckrOK {
-		_ = purego.Dlclose(handle)
+		_ = dlClose(handle)
 		return nil, check("C_GetFunctionList", rv)
 	}
 	if list == nil {
-		_ = purego.Dlclose(handle)
+		_ = dlClose(handle)
 		return nil, fmt.Errorf("pkcs11: %s returned no function list", path)
 	}
+	entries := functionPointers(list, fnSign)
 
 	m := &module{handle: handle, path: path}
 	for _, entry := range []struct {
@@ -350,29 +492,37 @@ func openModule(path string) (*module, error) {
 		{fnSignInit, &m.signInit},
 		{fnSign, &m.sign},
 	} {
-		if list.fn[entry.index] == 0 {
-			_ = purego.Dlclose(handle)
+		if entries[entry.index] == 0 {
+			_ = dlClose(handle)
 			return nil, fmt.Errorf("pkcs11: %s implements no entry point at index %d", path, entry.index)
 		}
-		purego.RegisterFunc(entry.target, list.fn[entry.index])
+		bindAddress(entry.target, entries[entry.index])
 	}
 	return m, nil
 }
 
 // bind resolves one named symbol into a Go function value.
 func bind(handle uintptr, target any, symbol string) error {
-	address, err := purego.Dlsym(handle, symbol)
+	address, err := dlSym(handle, symbol)
 	if err != nil {
-		return fmt.Errorf("symbol %s: %w", symbol, err)
+		return err
 	}
-	purego.RegisterFunc(target, address)
+	bindAddress(target, address)
 	return nil
 }
+
+// bindAddress binds a C function pointer to a Go function value.
+//
+// It is the one line of purego that is not platform-specific — the call layer supports every platform
+// this project builds for, and only the loader in dl_unix.go and dl_windows.go differs — and it is a
+// function rather than a call at each site so that the whole of the FFI surface is nameable: `bind`,
+// `bindAddress` and the three loader calls, and nothing else in the project touches a C ABI.
+func bindAddress(target any, address uintptr) { purego.RegisterFunc(target, address) }
 
 // close releases the library.
 func (m *module) close() {
 	if m.handle != 0 {
-		_ = purego.Dlclose(m.handle)
+		_ = dlClose(m.handle)
 		m.handle = 0
 	}
 }
@@ -449,13 +599,10 @@ func (m *module) loginUser(session ckULong, pin []byte) error {
 // The bound is small and deliberate: this package looks for exactly one key, and a template that
 // matched a hundred is a template the caller must make more specific rather than one this package
 // should page through.
-func (m *module) find(session ckULong, template []ckAttribute, max int) ([]ckULong, error) {
-	var templatePtr unsafe.Pointer
-	if len(template) > 0 {
-		templatePtr = unsafe.Pointer(&template[0])
-	}
-	if err := check("C_FindObjectsInit",
-		m.findObjectsInit(session, templatePtr, ckULong(len(template)))); err != nil {
+func (m *module) find(session ckULong, template *attributeTemplate, max int) ([]ckULong, error) {
+	err := check("C_FindObjectsInit", m.findObjectsInit(session, template.pointer(), template.count()))
+	template.done()
+	if err != nil {
 		return nil, err
 	}
 	// Finalised on every path, including the error ones: a module that is left mid-search refuses the
@@ -478,22 +625,26 @@ func (m *module) find(session ckULong, template []ckAttribute, max int) ([]ckULo
 // answers CKR_ATTRIBUTE_TYPE_INVALID rather than a zero length, so the error is returned rather than
 // rendered as an empty value.
 func (m *module) attribute(session, object, kind ckULong) ([]byte, error) {
-	template := []ckAttribute{{kind: kind}}
-	rv := m.getAttributeValue(session, object, unsafe.Pointer(&template[0]), 1)
+	template := newAttributeTemplate(1)
+	template.set(0, kind, nil)
+	rv := m.getAttributeValue(session, object, template.pointer(), 1)
+	template.done()
 	if rv != ckrOK && rv != ckrBufferTooSmall {
 		return nil, check("C_GetAttributeValue", rv)
 	}
-	if template[0].valueLen == 0 {
+	length := template.valueLen(0)
+	if length == 0 {
 		return nil, nil
 	}
 
-	buf := make([]byte, template[0].valueLen)
-	template[0].value = unsafe.Pointer(&buf[0])
-	if err := check("C_GetAttributeValue",
-		m.getAttributeValue(session, object, unsafe.Pointer(&template[0]), 1)); err != nil {
+	buf := make([]byte, length)
+	template.set(0, kind, buf)
+	err := check("C_GetAttributeValue", m.getAttributeValue(session, object, template.pointer(), 1))
+	template.done()
+	if err != nil {
 		return nil, err
 	}
-	return buf[:template[0].valueLen], nil
+	return buf[:template.valueLen(0)], nil
 }
 
 // attributeULong reads an attribute that holds a single CK_ULONG.
@@ -502,11 +653,11 @@ func (m *module) attributeULong(session, object, kind ckULong) (ckULong, error) 
 	if err != nil {
 		return 0, err
 	}
-	if len(raw) != int(unsafe.Sizeof(ckULong(0))) {
+	if len(raw) != layout.ulong {
 		return 0, fmt.Errorf("pkcs11: attribute 0x%X is %d bytes, expected %d",
-			kind, len(raw), unsafe.Sizeof(ckULong(0)))
+			kind, len(raw), layout.ulong)
 	}
-	return *(*ckULong)(unsafe.Pointer(&raw[0])), nil
+	return readULong(raw, 0), nil
 }
 
 // signData runs C_SignInit and C_Sign over one buffer.
@@ -515,8 +666,8 @@ func (m *module) attributeULong(session, object, kind ckULong) (ckULong, error) 
 // which it always is here, because the caller signs either a canonical JSON document or a SHA-256
 // digest of one.
 func (m *module) signData(session, key, mechanism ckULong, data []byte) ([]byte, error) {
-	mech := ckMechanism{mechanism: mechanism}
-	if err := check("C_SignInit", m.signInit(session, unsafe.Pointer(&mech), key)); err != nil {
+	mech := encodeMechanism(mechanism)
+	if err := check("C_SignInit", m.signInit(session, unsafe.Pointer(&mech[0]), key)); err != nil {
 		return nil, err
 	}
 	if len(data) == 0 {
@@ -539,9 +690,6 @@ func (m *module) signData(session, key, mechanism ckULong, data []byte) ([]byte,
 	}
 	return signature[:length], nil
 }
-
-// sizeOfULong is CK_ULONG's width, for the attribute templates that pass one by address.
-const sizeOfULong = unsafe.Sizeof(ckULong(0))
 
 // pointerTo takes the address of a value for a C call.
 //

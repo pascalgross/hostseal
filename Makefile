@@ -87,7 +87,8 @@ windows-build: ## Check that the Windows agent still cross-compiles
 	GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -o /dev/null ./cmd/hostseal-update-scan
 	GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -o /dev/null ./cmd/hostseal
 	GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go vet ./cmd/hostseal-agent ./cmd/hostseal-update-scan \
-	  ./internal/winapi ./internal/updatescan ./internal/collect/platform
+	  ./internal/winapi ./internal/updatescan ./internal/collect/platform \
+	  ./internal/signing/backend/pkcs11 ./internal/localsign
 	@# internal/wua is vetted by golangci-lint, which can scope the unsafeptr exclusion to the one
 	@# file that earns it. Raw `go vet` has no such setting, and excluding the whole package here
 	@# would stop checking the two files that do no unsafe work at all.
@@ -178,10 +179,11 @@ golangci: ## golangci-lint, for this platform and for Windows
 	@# is invisible to the pass above, so without this second one several thousand lines would ship
 	@# having been linted by nothing at all. It caught six real findings the first time it was run.
 	@#
-	@# The package list is explicit rather than ./... because internal/signing/backend/pkcs11 does not
-	@# build for Windows: purego's Dlopen is POSIX-only. That is a property of the operator's CLI, which
-	@# has never been built for Windows and is not a managed-host binary, so it is out of scope here
-	@# rather than a gap being papered over.
+	@# The package list is explicit rather than ./... because a Windows pass over every package would
+	@# lint a great deal of code that no Windows binary links, and slowly. It names the operator's CLI
+	@# and the signing packages as well as the agent's: an operator's workstation is very often a
+	@# Windows one, and since the PKCS#11 backend learned LoadLibraryEx that is where its token signing
+	@# happens — an FFI path linted by nothing would be the worst of the set to leave unlinted.
 	GOOS=windows GOARCH=amd64 golangci-lint run $(WINDOWS_PACKAGES)
 
 # The packages a Windows agent is built from, for the linter and the cross-compile check.
@@ -190,7 +192,8 @@ golangci: ## golangci-lint, for this platform and for Windows
 # other would be one that compiles and is never linted, which is the state this list exists to end.
 WINDOWS_PACKAGES := ./cmd/hostseal/... ./cmd/hostseal-agent/... ./cmd/hostseal-update-scan/... \
   ./internal/winapi/... ./internal/wua/... ./internal/updatescan/... \
-  ./internal/collect/... ./internal/agent/... ./internal/policy/... ./internal/run/...
+  ./internal/collect/... ./internal/agent/... ./internal/policy/... ./internal/run/... \
+  ./internal/signing/... ./internal/localsign/...
 
 .PHONY: fmt
 fmt: ## Format Go source

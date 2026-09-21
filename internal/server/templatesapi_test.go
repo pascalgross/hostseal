@@ -708,6 +708,35 @@ func TestABootstrapIsCheckedWhereItsBytesAreChosen(t *testing.T) {
 	}
 }
 
+// TestASignedVersionNamesItsKeyAndAlgorithmEverywhereItIsListed keeps the browser able to say what a
+// host will check.
+//
+// "Signed" on its own answers half the operator's question. A `trusted-signers` line carries an
+// algorithm as well as a key id, and a version signed by the right person under the other algorithm is
+// refused at enrolment — so a page that could only say "signed" would leave somebody comparing one
+// half of a line against a host they cannot see. The three places a version appears have to agree
+// about it: the summary listing, the version itself, and the revision history.
+func TestASignedVersionNamesItsKeyAndAlgorithmEverywhereItIsListed(t *testing.T) {
+	h := newHarness(t)
+	h.saveSignedTemplate(t, "standard-server", "#cloud-config\nhostname: signed\n")
+
+	for _, path := range []string{
+		"/api/v1/templates",
+		"/api/v1/templates/standard-server",
+		"/api/v1/templates/standard-server/versions",
+	} {
+		status, raw := h.adminJSON(t, h.adminToken, http.MethodGet, path, nil)
+		if status != http.StatusOK {
+			t.Fatalf("%s: %d %s", path, status, raw)
+		}
+		for _, want := range []string{`"signerKeyId":"ops-laptop"`, `"signerAlgorithm":"ed25519"`} {
+			if !strings.Contains(string(raw), want) {
+				t.Errorf("%s does not carry %s: %s", path, want, raw)
+			}
+		}
+	}
+}
+
 // saveSignedTemplate stores one signed version through the API, signed the way an operator's offline
 // tool signs it, and returns the base64 signature.
 //

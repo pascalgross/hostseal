@@ -9,6 +9,7 @@ import {
   TemplateVersion,
   TemplatesResponse,
 } from '../core/api.models';
+import { LocalSignerService } from '../core/local-signer.service';
 import { TemplatesPage } from './templates-page';
 
 /** Builds one revision of the history, so each spec names only the part it is about. */
@@ -506,5 +507,231 @@ describe('TemplatesPage archiving', () => {
 
     click(fixture, 'Hide archived');
     expect(listings).toEqual([false, true, false]);
+  });
+});
+
+
+/**
+ * The signing members these specs drive, named so the casts below stay readable.
+ *
+ * Driven directly rather than through the buttons for the reason the interface above exists: what is
+ * under test is what the page does with a signature, and a click path through Material's button
+ * component would be testing Material.
+ */
+interface SigningInternals {
+  /** Looks for a signer on this machine. */
+  findSigner(): void;
+
+  /** Signs the open version and stores the result as the next one. */
+  signOpen(): void;
+}
+
+/** A local signer that answers, or fails the way a missing one does. */
+interface FakeSigner {
+  /** What `status()` answers with, or the failure it raises. */
+  status: () => ReturnType<LocalSignerService['status']>;
+
+  /** What `signTemplate()` answers with, or the failure it raises. */
+  signTemplate: (name: string, body: string) => ReturnType<LocalSignerService['signTemplate']>;
+}
+
+/** Renders the page with one version open, a fake control plane and a fake local signer. */
+function renderWithSigner(
+  open: TemplateVersion,
+  signer: Partial<FakeSigner>,
+  api: Partial<Record<string, unknown>> = {},
+): ComponentFixture<TemplatesPage> {
+  TestBed.configureTestingModule({
+    providers: [
+      provideZonelessChangeDetection(),
+      {
+        provide: ApiService,
+        useValue: {
+          templates: () => of({ templates: [] }),
+          template: () => of(open),
+          templateVersions: () => of({ name: open.name, versions: [revision({ version: 1 })] }),
+          createTemplate: () => of({ name: open.name, version: open.version + 1, signed: true }),
+          ...api,
+        } as unknown as ApiService,
+      },
+      {
+        provide: LocalSignerService,
+        useValue: {
+          status: () => throwError(() => ({ status: 0 })),
+          signTemplate: () => throwError(() => ({ status: 0 })),
+          ...signer,
+        } as unknown as LocalSignerService,
+      },
+    ],
+  });
+  const fixture = TestBed.createComponent(TemplatesPage);
+  fixture.detectChanges();
+  (fixture.componentInstance as unknown as PageInternals).open(open.name);
+  fixture.detectChanges();
+  return fixture;
+}
+
+describe('TemplatesPage signing', () => {
+  /**
+   * The page has to say why a bootstrap needs a signature at all, where the signature is made, and
+   * what the host checks it against. Those three sentences are the difference between an operator who
+   * understands that HostSeal cannot sign for them and one who files a bug asking for a "sign"
+   * button on the server.
+   *
+   * Asserted rather than reviewed for because an explanation is the first thing a redesign drops: the
+   * page still works without it, and nothing goes red.
+   */
+  it('explains why a bootstrap is signed, where, and what verifies it', () => {
+    const fixture = renderWithSigner(version({}), {});
+    const page = text(fixture.nativeElement.querySelector('mat-card-content'));
+    const whole = text(fixture.nativeElement);
+
+    expect(page).toBeDefined();
+    expect(whole).toContain('/etc/hostseal/trusted-signers');
+    expect(whole).toContain('never leaves the YubiKey');
+    expect(whole).toContain('on your own machine');
+  });
+
+  /**
+   * "Signed" on its own answers half the question. Which key, and under which algorithm, is what an
+   * operator compares against a host's trusted-signers line — and a version signed by the right
+   * person under the other algorithm is refused at enrolment with nothing on the page to explain it.
+   */
+  it('names the key and the algorithm a version was signed with', () => {
+    const fixture = renderWithSigner(
+      version({ signed: true, signerKeyId: 'ops-yubikey-1', signerAlgorithm: 'ecdsa-p256' }),
+      {},
+    );
+
+    const whole = text(fixture.nativeElement);
+    expect(whole).toContain('ops-yubikey-1');
+    expect(whole).toContain('ecdsa-p256');
+  });
+
+  /**
+   * The flow itself: the page sends the open version's name and body to the signer, and stores what
+   * comes back as a new version carrying the signature triple.
+   *
+   * The body is asserted on the way out because it is the thing the signature covers. A page that
+   * sent one body to the signer and stored another would produce a version that looks signed and is
+   * refused by every host — the failure is silent here and loud, days later, on somebody's machine.
+   */
+  it('signs the open version with the local signer and stores the signature', () => {
+    const stored: Record<string, unknown>[] = [];
+    const asked: string[] = [];
+    const fixture = renderWithSigner(
+      version({ name: 'standard-server', version: 3, body: '#cloud-config\nhostname: x\n' }),
+      {
+        signTemplate: (name: string, body: string) => {
+          asked.push(`${name}|${body}`);
+          return of({
+            name,
+            signature: 'c2lnbmF0dXJl',
+            signerKeyId: 'ops-yubikey-1',
+            signerAlgorithm: 'ecdsa-p256',
+          });
+        },
+      },
+      {
+        createTemplate: (request: Record<string, unknown>) => {
+          stored.push(request);
+          return of({ name: 'standard-server', version: 4, signed: true });
+        },
+      },
+    );
+
+    (fixture.componentInstance as unknown as SigningInternals).signOpen();
+    fixture.detectChanges();
+
+    expect(asked).toEqual(['standard-server|#cloud-config\nhostname: x\n']);
+    expect(stored.length).toBe(1);
+    expect(stored[0]).toEqual({
+      name: 'standard-server',
+      body: '#cloud-config\nhostname: x\n',
+      signature: 'c2lnbmF0dXJl',
+      signerKeyId: 'ops-yubikey-1',
+      signerAlgorithm: 'ecdsa-p256',
+    });
+  });
+
+  /**
+   * A signature is only ever about the template it was made for. Storing one against another name
+   * would produce a version that reads as signed here and is refused by every host, for a reason
+   * nothing on this page could explain — so the echoed name is checked and nothing is stored.
+   */
+  it('stores nothing when the signer answers about a different template', () => {
+    const stored: unknown[] = [];
+    const fixture = renderWithSigner(
+      version({ name: 'standard-server' }),
+      {
+        signTemplate: () =>
+          of({
+            name: 'something-else',
+            signature: 'c2ln',
+            signerKeyId: 'ops-yubikey-1',
+            signerAlgorithm: 'ed25519',
+          }),
+      },
+      {
+        createTemplate: (request: unknown) => {
+          stored.push(request);
+          return of({ name: 'standard-server', version: 4, signed: true });
+        },
+      },
+    );
+
+    (fixture.componentInstance as unknown as SigningInternals).signOpen();
+    fixture.detectChanges();
+
+    expect(stored.length).toBe(0);
+    expect(text(fixture.nativeElement)).toContain('something-else');
+  });
+
+  /**
+   * The actionable half of "no signer". A page that said "could not connect" would leave an operator
+   * with nothing to do; the command, with this page's own origin already in it, is the one thing they
+   * cannot guess — a signer started with any other --origin refuses every request from here.
+   */
+  it('says what to run when no signer answers', () => {
+    const fixture = renderWithSigner(version({}), {
+      status: () => throwError(() => ({ status: 0 })),
+    });
+
+    (fixture.componentInstance as unknown as SigningInternals).findSigner();
+    fixture.detectChanges();
+
+    const whole = text(fixture.nativeElement);
+    expect(whole).toContain('hostseal signer');
+    expect(whole).toContain('--origin');
+    expect(whole).toContain(location.origin);
+    expect(whole).toContain('libykcs11.dll');
+  });
+
+  /**
+   * And the found case: the key that will sign, and the line a host needs in its own
+   * trusted-signers for that key to mean anything. The second is the step that otherwise gets
+   * skipped, because it is the only part of this that no tooling can do for anybody — the file is
+   * edited by hand, by an administrator, on each host.
+   */
+  it('shows the key it found and the line a host needs for it', () => {
+    const fixture = renderWithSigner(version({}), {
+      status: () =>
+        of({
+          signer: 'hostseal',
+          version: '1.2.3',
+          keyId: 'ops-yubikey-1',
+          algorithm: 'ecdsa-p256',
+          backend: 'pkcs11',
+          trustedSignerLine: 'ecdsa-p256 QUJD ops-yubikey-1 pkcs11',
+        }),
+    });
+
+    (fixture.componentInstance as unknown as SigningInternals).findSigner();
+    fixture.detectChanges();
+
+    const whole = text(fixture.nativeElement);
+    expect(whole).toContain('ops-yubikey-1');
+    expect(whole).toContain('pkcs11');
+    expect(whole).toContain('ecdsa-p256 QUJD ops-yubikey-1 pkcs11');
   });
 });

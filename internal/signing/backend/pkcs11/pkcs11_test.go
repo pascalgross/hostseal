@@ -1,5 +1,3 @@
-//go:build !windows
-
 package pkcs11
 
 import (
@@ -11,12 +9,11 @@ import (
 	"math/big"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
 	"unsafe"
-
-	"github.com/ebitengine/purego"
 
 	"github.com/pascalgross/hostseal/internal/signing"
 	"github.com/pascalgross/hostseal/internal/signing/backend"
@@ -188,8 +185,8 @@ func generateFixtureKeys(path string) error {
 		return err
 	}
 
-	args := ckInitializeArgs{flags: ckfOSLockingOK}
-	if err := check("C_Initialize", mod.initialize(pointerTo(&args))); err != nil {
+	args := encodeInitializeArgs(ckfOSLockingOK)
+	if err := check("C_Initialize", mod.initialize(pointerTo(&args[0]))); err != nil {
 		return err
 	}
 
@@ -252,7 +249,7 @@ func generateFixtureKeys(path string) error {
 
 // fixtureFunctions binds the three extra entry points the fixture needs.
 func fixtureFunctions(mod *module, path string) (*fixtureModule, error) {
-	handle, err := purego.Dlopen(path, purego.RTLD_NOW|purego.RTLD_LOCAL)
+	handle, err := dlOpen(path)
 	if err != nil {
 		return nil, err
 	}
@@ -260,15 +257,16 @@ func fixtureFunctions(mod *module, path string) (*fixtureModule, error) {
 	if err := bind(handle, &getFunctionList, "C_GetFunctionList"); err != nil {
 		return nil, err
 	}
-	var raw *functionList
+	var raw *byte
 	if rv := getFunctionList(unsafe.Pointer(&raw)); rv != ckrOK {
 		return nil, check("C_GetFunctionList", rv)
 	}
 
+	entries := functionPointers(raw, fnGenerateKeyPair)
 	out := &fixtureModule{module: mod}
-	purego.RegisterFunc(&out.initToken, raw.fn[fnInitToken])
-	purego.RegisterFunc(&out.initPIN, raw.fn[fnInitPIN])
-	purego.RegisterFunc(&out.generateKeyPair, raw.fn[fnGenerateKeyPair])
+	bindAddress(&out.initToken, entries[fnInitToken])
+	bindAddress(&out.initPIN, entries[fnInitPIN])
+	bindAddress(&out.generateKeyPair, entries[fnGenerateKeyPair])
 	return out, nil
 }
 
@@ -293,32 +291,33 @@ func firstSlot(mod *module) (ckULong, error) {
 func (f *fixtureModule) generatePair(session, mechanism ckULong, params []byte,
 	label string, id []byte) error {
 
-	mech := ckMechanism{mechanism: mechanism}
-	yes := byte(1)
+	mech := encodeMechanism(mechanism)
+	yes := []byte{1}
 	labelBytes := []byte(label)
-	curve := params
 
-	public := []ckAttribute{
-		{kind: ckaToken, value: unsafe.Pointer(&yes), valueLen: 1},
-		{kind: ckaVerify, value: unsafe.Pointer(&yes), valueLen: 1},
-		{kind: ckaECParams, value: unsafe.Pointer(&curve[0]), valueLen: ckULong(len(curve))},
-		{kind: ckaLabel, value: unsafe.Pointer(&labelBytes[0]), valueLen: ckULong(len(labelBytes))},
-		{kind: ckaID, value: unsafe.Pointer(&id[0]), valueLen: ckULong(len(id))},
-	}
-	private := []ckAttribute{
-		{kind: ckaToken, value: unsafe.Pointer(&yes), valueLen: 1},
-		{kind: ckaPrivate, value: unsafe.Pointer(&yes), valueLen: 1},
-		{kind: ckaSensitive, value: unsafe.Pointer(&yes), valueLen: 1},
-		{kind: ckaSign, value: unsafe.Pointer(&yes), valueLen: 1},
-		{kind: ckaLabel, value: unsafe.Pointer(&labelBytes[0]), valueLen: ckULong(len(labelBytes))},
-		{kind: ckaID, value: unsafe.Pointer(&id[0]), valueLen: ckULong(len(id))},
-	}
+	public := newAttributeTemplate(5)
+	public.set(0, ckaToken, yes)
+	public.set(1, ckaVerify, yes)
+	public.set(2, ckaECParams, params)
+	public.set(3, ckaLabel, labelBytes)
+	public.set(4, ckaID, id)
+
+	private := newAttributeTemplate(6)
+	private.set(0, ckaToken, yes)
+	private.set(1, ckaPrivate, yes)
+	private.set(2, ckaSensitive, yes)
+	private.set(3, ckaSign, yes)
+	private.set(4, ckaLabel, labelBytes)
+	private.set(5, ckaID, id)
 
 	var pub, priv ckULong
-	return check("C_GenerateKeyPair", f.generateKeyPair(session, unsafe.Pointer(&mech),
-		unsafe.Pointer(&public[0]), ckULong(len(public)),
-		unsafe.Pointer(&private[0]), ckULong(len(private)),
+	err := check("C_GenerateKeyPair", f.generateKeyPair(session, unsafe.Pointer(&mech[0]),
+		public.pointer(), public.count(),
+		private.pointer(), private.count(),
 		unsafe.Pointer(&pub), unsafe.Pointer(&priv)))
+	public.done()
+	private.done()
+	return err
 }
 
 // reference builds a PKCS#11 URI for the fixture token, with the scheme already stripped.
@@ -333,28 +332,143 @@ func pinPrompt(pin string) backend.PassphraseFunc {
 
 // TestTheCTypesAreTheSizeCExpects converts the one silent failure mode into a named one.
 //
-// purego gives no compiler check on the ABI: a struct one field short shifts every entry point and
+// purego gives no compiler check on the ABI: an offset one field out shifts every entry point and
 // calls C_Finalize where C_Initialize was meant, and the symptom is a crash inside a vendor library
-// rather than a build error. These four sizes are the whole of the layout this package asserts, and
-// the cost of asserting them is nothing.
+// rather than a build error. This is the whole of the layout this package asserts, and the cost of
+// asserting it is nothing.
+//
+// Both platforms' tables are checked on whichever platform the test runs, and that is the point rather
+// than thoroughness. The Unix numbers are also proved by every round-trip test below, against a real
+// module. The Windows numbers are proved by nothing at all until somebody plugs a token into a Windows
+// machine — they are read from the specification's packing directive and from the vendor headers that
+// follow it — so the arithmetic behind them is written out here where it can be checked by eye against
+// a header, on any machine, by anybody.
 func TestTheCTypesAreTheSizeCExpects(t *testing.T) {
 	for _, c := range []struct {
-		// what names the C type.
+		// what names the platform and the type.
 		what string
 
-		// got is Go's size for it.
-		got uintptr
+		// got is the offset or size this package will use.
+		got int
 
-		// want is what the C ABI lays out on LP64.
-		want uintptr
+		// want is what that platform's C compiler lays out.
+		want int
 	}{
-		{"CK_ATTRIBUTE", unsafe.Sizeof(ckAttribute{}), 24},
-		{"CK_MECHANISM", unsafe.Sizeof(ckMechanism{}), 24},
-		{"CK_C_INITIALIZE_ARGS", unsafe.Sizeof(ckInitializeArgs{}), 48},
-		{"CK_FUNCTION_LIST", unsafe.Sizeof(functionList{}), 8 + fnCount*8},
+		// LP64 Unix: eight-byte CK_ULONG, the compiler's own alignment, so CK_ATTRIBUTE is
+		// {type at 0, pointer at 8, length at 16} and the two bytes of CK_VERSION are followed by six
+		// of padding.
+		{"unix CK_ULONG", unixABI.ulong, 8},
+		{"unix CK_ATTRIBUTE size", unixABI.attributeSize, 24},
+		{"unix CK_ATTRIBUTE.pValue", unixABI.attributeValue, 8},
+		{"unix CK_ATTRIBUTE.ulValueLen", unixABI.attributeLen, 16},
+		{"unix CK_MECHANISM size", unixABI.mechanismSize, 24},
+		{"unix CK_MECHANISM.pParameter", unixABI.mechanismParam, 8},
+		{"unix CK_MECHANISM.ulParameterLen", unixABI.mechanismParamLen, 16},
+		{"unix CK_C_INITIALIZE_ARGS size", unixABI.initializeArgsSize, 48},
+		{"unix CK_C_INITIALIZE_ARGS.flags", unixABI.initializeArgsFlags, 4 * 8},
+		{"unix CK_FUNCTION_LIST first entry", unixABI.functionListFirst, 8},
+
+		// Windows: `unsigned long` is four bytes, and the Cryptoki packing directive removes every
+		// byte of padding — so CK_ATTRIBUTE is {0, 4, 12} and sixteen bytes long, the initialisation
+		// arguments are four callbacks then flags at 32 and pReserved at 36, and the function list's
+		// entry points start immediately after the two-byte version.
+		{"windows CK_ULONG", windowsABI.ulong, 4},
+		{"windows CK_ATTRIBUTE size", windowsABI.attributeSize, 4 + 8 + 4},
+		{"windows CK_ATTRIBUTE.pValue", windowsABI.attributeValue, 4},
+		{"windows CK_ATTRIBUTE.ulValueLen", windowsABI.attributeLen, 4 + 8},
+		{"windows CK_MECHANISM size", windowsABI.mechanismSize, 4 + 8 + 4},
+		{"windows CK_MECHANISM.pParameter", windowsABI.mechanismParam, 4},
+		{"windows CK_MECHANISM.ulParameterLen", windowsABI.mechanismParamLen, 4 + 8},
+		{"windows CK_C_INITIALIZE_ARGS size", windowsABI.initializeArgsSize, 4*8 + 4 + 8},
+		{"windows CK_C_INITIALIZE_ARGS.flags", windowsABI.initializeArgsFlags, 4 * 8},
+		{"windows CK_FUNCTION_LIST first entry", windowsABI.functionListFirst, 2},
 	} {
 		if c.got != c.want {
-			t.Errorf("%s is %d bytes in Go and %d in C", c.what, c.got, c.want)
+			t.Errorf("%s is %d in the table and %d in C", c.what, c.got, c.want)
+		}
+	}
+
+	// And the table this build actually uses is its own platform's, which is the half a wrong build
+	// tag would get wrong while every number above stayed right.
+	if runtime.GOOS == "windows" {
+		if layout != windowsABI {
+			t.Error("a Windows build is using the Unix layout")
+		}
+	} else if layout != unixABI {
+		t.Errorf("a %s build is using the Windows layout", runtime.GOOS)
+	}
+	if int(unsafe.Sizeof(ckULong(0))) != layout.ulong {
+		t.Errorf("ckULong is %d bytes and the layout says %d — the Go type and the table have to be "+
+			"the same width, or every count passed to the module is read at the wrong size",
+			unsafe.Sizeof(ckULong(0)), layout.ulong)
+	}
+}
+
+// TestAnAttributeTemplateIsLaidOutTheWayTheModuleReadsIt checks the encoder against the table.
+//
+// The table says where the fields go; this says the encoder puts them there, for both platforms'
+// numbers rather than only for the one it is running on. It is the closest thing to a Windows test
+// this project can run without a Windows machine: the bytes it builds are the bytes a module would be
+// handed, and a value at the wrong offset is visible here rather than as a refused signature later.
+func TestAnAttributeTemplateIsLaidOutTheWayTheModuleReadsIt(t *testing.T) {
+	// Saved and restored around the test, because it is process-wide state and the round-trip tests
+	// against a real module run in the same binary.
+	original := layout
+	defer func() { layout = original }()
+
+	for _, abi := range []abiLayout{unixABI, windowsABI} {
+		layout = abi
+
+		template := newAttributeTemplate(2)
+		value := []byte{0xAA, 0xBB, 0xCC}
+		template.set(0, ckaClass, encodeULong(ckoPrivateKey))
+		template.set(1, ckaLabel, value)
+
+		if got := len(template.raw); got != 2*abi.attributeSize {
+			t.Errorf("a two-attribute template is %d bytes, want %d", got, 2*abi.attributeSize)
+		}
+		if got := template.count(); got != 2 {
+			t.Errorf("the template counts %d attributes, want 2", got)
+		}
+		if got := readULong(template.raw, abi.attributeType); got != ckaClass {
+			t.Errorf("the first attribute's type reads 0x%X, want 0x%X", got, ckaClass)
+		}
+		if got := template.valueLen(0); got != ckULong(abi.ulong) {
+			t.Errorf("a CK_ULONG value is %d bytes long in the template, want %d", got, abi.ulong)
+		}
+		if got := template.valueLen(1); got != ckULong(len(value)) {
+			t.Errorf("the label's length reads %d, want %d", got, len(value))
+		}
+		if readPointer(template.raw, abi.attributeSize+abi.attributeValue) == 0 {
+			t.Error("the label's pValue is nil; the module would read nothing")
+		}
+
+		// The length query and the answer are the same two calls a module sees, so the template has
+		// to go back to "no value, no length" and then take one.
+		template.set(1, ckaLabel, nil)
+		if template.valueLen(1) != 0 || readPointer(template.raw, abi.attributeSize+abi.attributeValue) != 0 {
+			t.Error("asking for a length left the previous value in place")
+		}
+
+		mech := encodeMechanism(ckmECDSA)
+		if len(mech) != abi.mechanismSize {
+			t.Errorf("CK_MECHANISM is %d bytes, want %d", len(mech), abi.mechanismSize)
+		}
+		if got := readULong(mech, abi.mechanismType); got != ckmECDSA {
+			t.Errorf("the mechanism reads 0x%X, want 0x%X", got, ckmECDSA)
+		}
+
+		args := encodeInitializeArgs(ckfOSLockingOK)
+		if len(args) != abi.initializeArgsSize {
+			t.Errorf("CK_C_INITIALIZE_ARGS is %d bytes, want %d", len(args), abi.initializeArgsSize)
+		}
+		if got := readULong(args, abi.initializeArgsFlags); got != ckfOSLockingOK {
+			t.Errorf("the initialisation flags read 0x%X, want 0x%X", got, ckfOSLockingOK)
+		}
+		for i, b := range args[:abi.initializeArgsFlags] {
+			if b != 0 {
+				t.Errorf("mutex callback byte %d is 0x%X; all four have to stay nil", i, b)
+			}
 		}
 	}
 }
@@ -737,8 +851,8 @@ func readFixtureTokenInfo(t *testing.T, modulePath string) (tokenIdentity, strin
 	}
 	defer finalize(mod)
 
-	args := ckInitializeArgs{flags: ckfOSLockingOK}
-	if err := check("C_Initialize", mod.initialize(pointerTo(&args))); err != nil {
+	args := encodeInitializeArgs(ckfOSLockingOK)
+	if err := check("C_Initialize", mod.initialize(pointerTo(&args[0]))); err != nil {
 		t.Fatalf("initialising the module: %v", err)
 	}
 	slots, err := mod.slots()

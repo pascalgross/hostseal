@@ -171,7 +171,7 @@ Implemented today:
 | Backend | Reference scheme | What holds the key |
 | --- | --- | --- |
 | `file` | `file:`, or any path | A passphrase-protected key file: scrypt over the passphrase, NaCl secretbox over a PKCS#8 key |
-| `pkcs11` | `pkcs11:` | Any PKCS#11 module — YubiKey PIV, Nitrokey and SoftHSM through one implementation |
+| `pkcs11` | `pkcs11:` | Any PKCS#11 module — YubiKey PIV, Nitrokey and SoftHSM through one implementation, on Linux and on Windows |
 | `kms` | `awskms:`, `gcpkms:`, `azurekms:` | AWS KMS, Google Cloud KMS or Azure Key Vault, over their REST APIs and no vendor SDK |
 
 The middle column has more entries than the first on purpose: one backend registers three schemes,
@@ -225,6 +225,32 @@ worth knowing about — pure Ed25519 needs `MessageType: RAW`, which caps a payl
 
 A backend reports what a key can do rather than assuming: the algorithm comes from the key itself, and
 one this build cannot carry fails when the key is opened, with a message naming what it actually is.
+
+**`pkcs11` runs on Windows as well as Linux**, which matters because an operator's workstation is very
+often a Windows one while the fleet is not — and before it did, a person with a YubiKey and a Windows
+laptop had to keep the destructive tier's key in a file somewhere, which is the thing the token was
+bought to avoid. One URI parser, one slot search, one set of entry-point indices; two things differ by
+platform and both are one file each.
+
+The obvious one is loading the library: `dlopen`/`dlsym`/`dlclose` against
+`LoadLibraryEx`/`GetProcAddress`/`FreeLibrary`, in `dl_unix.go` and `dl_windows.go`.
+`LOAD_WITH_ALTERED_SEARCH_PATH` is passed with an absolute path so a module finds the libraries shipped
+beside it — Yubico's `libykcs11.dll` is not one file — rather than whatever is earliest on `PATH`.
+
+The one that is easy to miss is the ABI, and it is the one that would have been wrong silently.
+Cryptoki's own header note says structures are packed to one byte, which on Windows means
+`#pragma pack(push, cryptoki, 1)` and on Unix means nothing at all; and `CK_ULONG` is `unsigned long`,
+which is **four** bytes on Windows and eight on LP64 Unix, beside pointers that are eight on both. So
+`CK_ATTRIBUTE` is `{0, 8, 16}` and 24 bytes on Unix and `{0, 4, 12}` and 16 bytes on Windows, and a
+build that shared the Unix widths would load the right library and then mis-read every structure it
+handed to it. `abi.go` holds both layouts as data, nothing above it declares a C struct — Go can
+express neither the packing nor the per-platform width — and `TestTheCTypesAreTheSizeCExpects` asserts
+both tables on whichever platform it runs, because the Windows half is read from the specification and
+no machine here can run it.
+
+No vendor is hard-coded and no path is searched: the module the reference names is the module that is
+loaded, on both platforms. A Windows *host* links none of this and needs none of it; it executes the
+read tier, which carries no signature at all.
 
 Whatever the backend, the audit log and the UI always record **which** signer authorised a job:
 `ops-laptop (file)` must read differently from `ops-yubikey-1 (PKCS#11)`.

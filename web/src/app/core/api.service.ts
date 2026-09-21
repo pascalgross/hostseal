@@ -31,6 +31,7 @@ import {
   SessionsRevoked,
   SignInRequest,
   SignedIn,
+  SignedJob,
   StoredTemplateVersion,
   TemplateArchivalResult,
   TemplateVersion,
@@ -325,6 +326,23 @@ export class ApiService {
    * right way round.
    */
   createReadJob(request: CreateReadJobRequest): Observable<Job> {
+    return this.http.post<Job>('/api/v1/jobs', request, { headers: this.headers() });
+  }
+
+  /**
+   * Queues a job that was signed somewhere this control plane cannot reach.
+   *
+   * The same endpoint as above, and that is the point: what makes a job destructive is not how it was
+   * posted but that it carries a signature from a key in the target host's own `trusted-signers`. This
+   * method forwards a document produced by `hostseal sign` or by the operator's local signer, field
+   * for field — the signature covers the identifier, the host, the intent, the parameters, the window
+   * and the nonce, so anything this browser changed on the way through would simply stop verifying on
+   * the host.
+   *
+   * The control plane stores it, applies the fleet's release rule to it, and hands it over. It cannot
+   * produce one, which is the whole of docs/SECURITY.md §1's first paragraph.
+   */
+  createSignedJob(request: SignedJob): Observable<Job> {
     return this.http.post<Job>('/api/v1/jobs', request, { headers: this.headers() });
   }
 

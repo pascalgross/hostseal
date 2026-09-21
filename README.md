@@ -121,8 +121,14 @@ workflow that no maintainer can override:
   is running and whether any of it is privileged, seccomp-disabled or holding the Docker socket; it
   cannot answer image names or exit codes, and says so rather than guessing.
 - **Signing keys that are not files** — the destructive tier's key can live on a PKCS#11 token or in
-  AWS KMS, Cloud KMS or Key Vault. Whichever it is, the control plane does not hold it, and the audit
-  log records which one authorised each job.
+  AWS KMS, Cloud KMS or Key Vault, on Linux or on Windows. Whichever it is, the control plane does not
+  hold it, and the audit log records which one authorised each job.
+- **A YubiKey and a browser, without the copying** — `hostseal signer` runs on your own machine and
+  answers the web interface over loopback: the page says what it wants signed, the signer builds the
+  document itself, prints what it means in *its* terminal, and waits for you to answer and touch the
+  token. The key never reaches the browser or the control plane, and the signer will not sign anything
+  it was handed rather than assembled. See
+  [`docs/INSTALL.md`](docs/INSTALL.md#signing-from-the-web-interface).
 
 ## What it will never do
 

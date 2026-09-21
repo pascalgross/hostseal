@@ -52,6 +52,7 @@ usage:
   hostseal key show      print the trusted-signers line for an existing key
   hostseal sign          render a job request offline and sign it
   hostseal sign-template sign a provisioning template for the Tier 2 bootstrap
+  hostseal signer        serve signatures to the web interface from a token on this machine
   hostseal catalogue     print the intent catalogue this build knows
   hostseal version       print the version
 
@@ -83,6 +84,8 @@ func main() {
 		os.Exit(signCommand(args[1:]))
 	case "sign-template":
 		os.Exit(signTemplateCommand(args[1:]))
+	case "signer":
+		os.Exit(signerCommand(args[1:]))
 	case "version":
 		fmt.Println("hostseal " + buildinfo.String())
 	default:

@@ -464,6 +464,18 @@ type TemplateSummary struct {
 	// whether an enrolling host can be issued this template at all.
 	Signed bool
 
+	// SignerKeyID names the key that signed the latest version, empty when it is unsigned.
+	SignerKeyID string
+
+	// SignerAlgorithm is that signature's algorithm, empty when the version is unsigned.
+	//
+	// It travels with the key id everywhere the key id does, because the two answer one question
+	// between them: "ops-yubikey-1" says whose key and "ecdsa-p256" says which of the two wire
+	// algorithms a host will have to have in its trusted-signers line for that key. An operator
+	// pasting that line needs both, and a listing that showed only the first would send them to look
+	// the second up somewhere it is not written down.
+	SignerAlgorithm string
+
 	// Archived reports whether the name has been withdrawn from use.
 	//
 	// On the summary rather than only in a separate lookup because the listing is where an operator
@@ -501,6 +513,9 @@ type TemplateRevision struct {
 
 	// SignerKeyID names the key that signed it, empty when unsigned.
 	SignerKeyID string
+
+	// SignerAlgorithm is the signature's algorithm, empty when unsigned.
+	SignerAlgorithm string
 }
 
 // TemplateArchival records that a template name has been withdrawn from use.

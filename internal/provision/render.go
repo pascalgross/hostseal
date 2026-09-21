@@ -29,6 +29,26 @@ import (
 // the API boundary, where the operator who hit it can be told, rather than deep in the store.
 const MaxBodyBytes = 64 << 10
 
+// namePattern is the only shape a template name may take.
+//
+// A name is typed by an operator on a command line — `hostseal enroll --bootstrap standard-server` —
+// and recorded in a host's permanent bootstrap record, so it is kept to the characters that survive
+// both without quoting. An allowlist rather than a denylist, for the same reason job ids are.
+var namePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,63}$`)
+
+// NameShape describes the accepted shape, for error messages that say what to do instead.
+const NameShape = "lower-case letters, digits and hyphens, starting with a letter or digit, " +
+	"at most 64 characters"
+
+// ValidName reports whether a template name is one HostSeal will carry.
+//
+// It lives here, beside the body bound, rather than in the control plane that first needed it, because
+// it is no longer only the control plane that asks. A name is half of what a bootstrap signature
+// covers — the signed payload is {name, body} — so the local signer in internal/localsign has to know
+// the same rule: a signature made over a name the control plane will refuse to store is a token touch
+// spent on nothing, and an operator is the wrong person to discover that from a 400.
+func ValidName(name string) bool { return namePattern.MatchString(name) }
+
 // MaxRenderedBytes bounds what one render may produce.
 //
 // A body is bounded and a request is bounded, but substitution multiplies rather than adds: a 64 KiB

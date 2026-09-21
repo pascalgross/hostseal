@@ -74,6 +74,7 @@ func (s *scopedPostgres) ListTemplates(ctx context.Context, includeArchived bool
 			SELECT latest.name, latest.version, latest.created_at, latest.created_by,
 			       (latest.signature <> '' AND latest.signer_key_id <> ''
 			            AND latest.signer_algorithm <> '') AS signed,
+			       latest.signer_key_id, latest.signer_algorithm,
 			       a.archived_at, COALESCE(a.archived_by, '')
 			  FROM (SELECT DISTINCT ON (name) name, version, created_at, created_by, signature,
 			               signer_key_id, signer_algorithm
@@ -93,7 +94,8 @@ func (s *scopedPostgres) ListTemplates(ctx context.Context, includeArchived bool
 			var t TemplateSummary
 			var archivedAt *time.Time
 			if err := rows.Scan(&t.Name, &t.LatestVersion, &t.CreatedAt, &t.CreatedBy,
-				&t.Signed, &archivedAt, &t.ArchivedBy); err != nil {
+				&t.Signed, &t.SignerKeyID, &t.SignerAlgorithm,
+				&archivedAt, &t.ArchivedBy); err != nil {
 				return wrap(err, "scanning a template summary")
 			}
 			if archivedAt != nil {
@@ -198,7 +200,7 @@ func (s *scopedPostgres) ListTemplateVersions(ctx context.Context, name string) 
 		rows, err := tx.Query(ctx, `
 			SELECT version, created_at, created_by,
 			       (signature <> '' AND signer_key_id <> '' AND signer_algorithm <> '') AS signed,
-			       signer_key_id
+			       signer_key_id, signer_algorithm
 			  FROM templates
 			 WHERE tenant_id = $1 AND name = $2
 			 ORDER BY version DESC`, string(s.tenant), name)
@@ -210,7 +212,7 @@ func (s *scopedPostgres) ListTemplateVersions(ctx context.Context, name string) 
 		for rows.Next() {
 			var r TemplateRevision
 			if err := rows.Scan(&r.Version, &r.CreatedAt, &r.CreatedBy, &r.Signed,
-				&r.SignerKeyID); err != nil {
+				&r.SignerKeyID, &r.SignerAlgorithm); err != nil {
 				return wrap(err, "scanning a template revision")
 			}
 			out = append(out, r)

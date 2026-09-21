@@ -127,6 +127,35 @@ The signed payload is the canonical JSON encoding of:
 Nonces are persisted on the host so a replayed signature is refused. Validity windows are checked
 against the **local** clock only (see [§4.3](#43-clock-skew)).
 
+#### Where the signature is made
+
+`hostseal sign` at a terminal, or `hostseal signer` — a loopback HTTP service on the operator's own
+machine that the web interface asks. The second exists because an operator's workstation is very often
+a Windows one, and copying a JSON document out of a terminal into a browser was the only way to use a
+YubiKey from there. It changes where the operator stands and nothing else:
+
+- The key stays in the token. The browser and the control plane see a detached signature, a key id and
+  an algorithm name, and never anything else.
+- **The signed payload is built by the signer, never received.** A request over that socket carries a
+  host, an intent and its parameters — or a template's name and body — and the signer assembles the
+  document, chooses the job id, the nonce and both edges of the validity window itself, and
+  canonicalises it. A service that signed a digest handed to it by a web page would restore exactly
+  the attack the wire format exists to prevent: a compromised control plane showing one operation in
+  the browser and having another signed. `internal/signjob` is the one place those values are decided,
+  for both signing paths.
+- **The confirmation is on the machine holding the key**, and shows the operation decoded against that
+  binary's own catalogue — or the template body in full. The browser's rendering is not what is
+  authorised. An operator shown something there they did not ask for in the browser has caught a
+  compromised control plane, and says no.
+- The service listens on loopback only, answers only browser origins the operator named on its command
+  line, and refuses a request whose `Host` header is not a loopback literal, which is what a page that
+  rebound its own hostname to 127.0.0.1 would send. None of these is the control that matters — the
+  confirmation is — but a signer any page could reach would ask its operator to be the last line of
+  defence several times an hour, which is how confirmations stop being read.
+
+The control plane learns nothing new from any of this. It stores a signature it cannot mint, exactly as
+it does for one produced at a terminal.
+
 ---
 
 ## 3. The intent catalogue
@@ -948,10 +977,15 @@ to inherit.
 **Tier 2 — the exception, implemented.** `hostseal enroll --bootstrap NAME` applies a named template
 once, on a host that is being enrolled by hand. The template arrives in the enrolment response carrying
 a signature the control plane stored but cannot mint — it is produced offline by
-`hostseal sign-template`, with a key the control plane does not hold, and the enrolment token must have
-been minted naming that template, so holding a leaked token is not the authority to choose what runs.
+`hostseal sign-template`, or by `hostseal signer` when the operator signs from the web interface
+([§2.3](#23-offline-job-signing)), with a key the control plane does not hold, and the enrolment token
+must have been minted naming that template, so holding a leaked token is not the authority to choose
+what runs. Which of the two produced a signature is not a property a host can see or would act on: the
+payload is the same canonical `{name, body}` document either way, assembled on the operator's machine
+from a body printed in full on the operator's terminal.
 An agent that asked for a template and receives none, or an unsigned one, or one the fleet has since
-archived, fails the enrolment loudly rather than continuing as though something had been applied. Every one of these guardrails is required:
+archived, fails the enrolment loudly rather than continuing as though something had been applied. Every
+one of these guardrails is required:
 
 1. Explicit `--bootstrap NAME` on that specific invocation. Never implicit, never a server default,
    never a group setting.
@@ -1162,6 +1196,14 @@ An honest guarantee needs an honest boundary. HostSeal does not protect you from
 - **A compromised holder of a key in `trusted-signers`.** That key is the authority for destructive
   operations; this is exactly why the hardware-backed signing backends exist and why the audit log
   records *which* signer authorised each job.
+- **A compromised operator workstation while a signer is running there.** `hostseal signer`
+  ([§2.3](#23-offline-job-signing)) holds a logged-in token session for as long as it runs, so local
+  code on that machine can ask it for a signature — and gets a confirmation prompt, and on a token
+  with a touch policy a physical touch, before one is produced. That is the same exposure `hostseal
+  sign` has always had at the moment it is used, extended to the life of the process, which is why the
+  service exits after an idle period, refuses browser origins it was not told about, and cannot be
+  asked to sign anything it did not assemble and display itself. It is not a defence against malware
+  already running as the operator: nothing on that machine can be.
 - **A cloud KMS key the control plane's own identity can reach.** The `kms` backend keeps the private
   key in AWS KMS, Cloud KMS or Key Vault, and the control plane holds nothing — but "holds nothing" is
   not the property [§1](#1-the-guarantee) rests on. If the control plane runs in the same account and

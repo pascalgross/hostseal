@@ -86,14 +86,16 @@ func (s *scopedMemory) ListTemplates(_ context.Context, includeArchived bool) ([
 			continue
 		}
 		out = append(out, TemplateSummary{
-			Name:          t.Name,
-			LatestVersion: t.Version,
-			CreatedAt:     t.CreatedAt,
-			CreatedBy:     t.CreatedBy,
-			Signed:        t.Signed(),
-			Archived:      archival.Archived(),
-			ArchivedAt:    archival.ArchivedAt,
-			ArchivedBy:    archival.ArchivedBy,
+			Name:            t.Name,
+			LatestVersion:   t.Version,
+			CreatedAt:       t.CreatedAt,
+			CreatedBy:       t.CreatedBy,
+			Signed:          t.Signed(),
+			SignerKeyID:     t.SignerKeyID,
+			SignerAlgorithm: t.SignerAlgorithm,
+			Archived:        archival.Archived(),
+			ArchivedAt:      archival.ArchivedAt,
+			ArchivedBy:      archival.ArchivedBy,
 		})
 	}
 	sort.Slice(out, func(i, j int) bool {
@@ -118,11 +120,12 @@ func (s *scopedMemory) ListTemplateVersions(_ context.Context, name string) ([]T
 			continue
 		}
 		out = append(out, TemplateRevision{
-			Version:     t.Version,
-			CreatedAt:   t.CreatedAt,
-			CreatedBy:   t.CreatedBy,
-			Signed:      t.Signed(),
-			SignerKeyID: t.SignerKeyID,
+			Version:         t.Version,
+			CreatedAt:       t.CreatedAt,
+			CreatedBy:       t.CreatedBy,
+			Signed:          t.Signed(),
+			SignerKeyID:     t.SignerKeyID,
+			SignerAlgorithm: t.SignerAlgorithm,
 		})
 	}
 	if len(out) == 0 {
