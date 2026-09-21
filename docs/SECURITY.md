@@ -930,7 +930,10 @@ A template is therefore never deleted, and the control plane has no endpoint tha
 What an operator retiring a template gets instead is an **archival**, which withdraws the *name*: an
 archived template leaves the listing, refuses new versions, cannot be named by a new enrolment token,
 cannot be rendered, and is refused at enrolment — while every stored version stays readable, so the
-record on a host still resolves to the bytes that ran on it. The archival is a row about the name in a
+record on a host still resolves to the bytes that ran on it. The enrolment check runs twice: once
+before the certificate is issued, so that a refusal leaves the token usable, and once more after the
+token has been redeemed, because redemption is the moment an enrolment becomes the one that happened
+and a template withdrawn in between must not still be handed over. The archival is a row about the name in a
 table of its own, never a column on a version, because a version is written once and never updated and
 an UPDATE path added to carry a flag would be an UPDATE path whatever it was first used for. Restoring
 deletes that row and changes nothing else: a restored template is issuable at enrolment only on the

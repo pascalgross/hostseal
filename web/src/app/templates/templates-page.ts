@@ -198,14 +198,32 @@ export class TemplatesPage {
     this.reload();
   }
 
-  /** Re-reads the template list. */
+  /**
+   * Re-reads the template list.
+   *
+   * The mode the request went out with is checked again when it comes back, for the reason the open
+   * pane checks the template name: the toggle sends a second listing while the first is still in
+   * flight — including the one the constructor started — and nothing else ties an answer to the
+   * question it answers. Landing out of order would leave the button reading "Hide archived" over a
+   * list with the archived ones missing, which reads as the toggle being broken rather than as a
+   * response arriving late. A stale answer is dropped rather than shown: the matching one is always
+   * still on its way.
+   */
   protected reload(): void {
-    this.api.templates(this.showArchived()).subscribe({
+    const wanted = this.showArchived();
+    this.api.templates(wanted).subscribe({
       next: (response) => {
+        if (this.showArchived() !== wanted) {
+          return;
+        }
         this.templates.set(response.templates);
         this.error.set('');
       },
-      error: (err: unknown) => this.error.set(describeError(err)),
+      error: (err: unknown) => {
+        if (this.showArchived() === wanted) {
+          this.error.set(describeError(err));
+        }
+      },
     });
   }
 

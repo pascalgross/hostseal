@@ -969,3 +969,89 @@ func TestArchiveAndRestoreRefuseTheStatesTheyAreAlreadyIn(t *testing.T) {
 		}
 	}
 }
+
+// archiveOnRedemption is a store that withdraws one template the instant an enrolment token is spent.
+//
+// It stands in for the operator who presses Archive while a machine is enrolling. That interleaving
+// has no other seam: the enrolment resolves the template, issues a certificate and redeems the token as
+// three separate transactions, so the write that matters has to land from inside the request rather
+// than before or after it.
+type archiveOnRedemption struct {
+	// Store is the real store; only the redemption is decorated.
+	store.Store
+
+	// name is the template withdrawn as the token is spent.
+	name string
+}
+
+// In returns a scoped handle that archives the template as it consumes a token.
+func (s archiveOnRedemption) In(tenant store.TenantID) store.Scoped {
+	return archiveOnRedemptionScoped{Scoped: s.Store.In(tenant), name: s.name}
+}
+
+// archiveOnRedemptionScoped is one tenant's handle on archiveOnRedemption.
+type archiveOnRedemptionScoped struct {
+	// Scoped is the real handle; every method but the redemption is its own.
+	store.Scoped
+
+	// name is the template withdrawn as the token is spent.
+	name string
+}
+
+// ConsumeEnrollmentToken redeems the token and then archives the template, in that order.
+//
+// The order is the whole point: the archival commits after the redemption that proved this enrolment
+// is the one taking place, which is exactly the interleaving the re-check in the handler exists for.
+func (s archiveOnRedemptionScoped) ConsumeEnrollmentToken(ctx context.Context, hash, hostID string,
+	now time.Time) (store.EnrollmentToken, error) {
+
+	token, err := s.Scoped.ConsumeEnrollmentToken(ctx, hash, hostID, now)
+	if err != nil {
+		return token, err
+	}
+	if archiveErr := s.Scoped.ArchiveTemplate(ctx, store.TemplateArchival{
+		Name: s.name, ArchivedAt: now, ArchivedBy: "test:racer",
+	}); archiveErr != nil {
+		return token, archiveErr
+	}
+	return token, nil
+}
+
+// TestATemplateArchivedMidEnrolmentIsNotIssued closes the gap between the two checks.
+//
+// The early check runs before the certificate is issued, so that a refusal leaves the token usable;
+// that is the right place for it and it cannot also be the last word, because redemption — the moment
+// this enrolment becomes the one that happened — comes afterwards. An archival landing in between would
+// otherwise hand a machine the template the fleet had just retired, while the operator who pressed
+// Archive was told it had worked.
+//
+// What the refusal must leave behind is nothing: no host, no recorded certificate, and a message saying
+// the token is spent rather than one the operator has to decode on a retry.
+func TestATemplateArchivedMidEnrolmentIsNotIssued(t *testing.T) {
+	h := newHarness(t, func(real store.Store) store.Store {
+		return archiveOnRedemption{Store: real, name: "standard-server"}
+	})
+	signature := h.saveSignedTemplate(t, "standard-server", "#cloud-config\nhostname: bootstrapped\n")
+
+	status, _, raw := h.enrollDirect(t, protocol.EnrollRequest{
+		Token: h.issueBootstrapToken(t, "standard-server"), Hostname: "web-01",
+		RequestedBootstrap: "standard-server",
+	})
+	if status != http.StatusConflict || !strings.Contains(string(raw), "archived_template") {
+		t.Fatalf("a template archived mid-enrolment was not refused: %d %s", status, raw)
+	}
+	if strings.Contains(string(raw), signature) {
+		t.Fatalf("the refusal handed over the signature: %s", raw)
+	}
+	if !strings.Contains(string(raw), "has been spent") {
+		t.Fatalf("the refusal does not say the token is spent: %s", raw)
+	}
+
+	hosts, err := h.scoped().ListHosts(context.Background())
+	if err != nil {
+		t.Fatalf("listing hosts: %v", err)
+	}
+	if len(hosts) != 0 {
+		t.Fatalf("the refused enrolment left a host behind: %+v", hosts)
+	}
+}

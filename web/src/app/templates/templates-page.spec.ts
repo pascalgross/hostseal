@@ -1,9 +1,14 @@
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { provideZonelessChangeDetection } from '@angular/core';
-import { of, throwError } from 'rxjs';
+import { Subject, of, throwError } from 'rxjs';
 
 import { ApiService } from '../core/api.service';
-import { TemplateRevision, TemplateVersion } from '../core/api.models';
+import {
+  TemplateRevision,
+  TemplateSummary,
+  TemplateVersion,
+  TemplatesResponse,
+} from '../core/api.models';
 import { TemplatesPage } from './templates-page';
 
 /** Builds one revision of the history, so each spec names only the part it is about. */
@@ -13,6 +18,19 @@ function revision(partial: Partial<TemplateRevision>): TemplateRevision {
     signed: false,
     createdAt: '2026-08-24T09:41:07.512Z',
     createdBy: 'test:tester',
+    ...partial,
+  };
+}
+
+/** Builds one listing row, so each spec names only the part it is about. */
+function summary(partial: Partial<TemplateSummary>): TemplateSummary {
+  return {
+    name: 'standard-server',
+    latestVersion: 1,
+    createdAt: '2026-08-24T09:41:07.512Z',
+    createdBy: 'test:tester',
+    signed: false,
+    archived: false,
     ...partial,
   };
 }
@@ -45,6 +63,9 @@ interface PageInternals {
 
   /** Renders one revision's stored time, which is the formatting one spec is about. */
   stored(revision: TemplateRevision): string;
+
+  /** Shows or hides the withdrawn templates, which is what puts two listings in flight. */
+  toggleArchived(): void;
 }
 
 /** Renders the page with one template open and a fixed history behind it. */
@@ -428,6 +449,45 @@ describe('TemplatesPage archiving', () => {
 
     click(fixture, 'Restore');
     expect(calls).toEqual(['restore:standard-server']);
+  });
+
+  /**
+   * Two listings are in flight whenever the toggle is pressed while the constructor's first one is
+   * still out, and nothing but the requested mode ties an answer to the question it answers. Landing
+   * out of order would leave the button reading "Hide archived" over a list with the archived ones
+   * missing — which reads as the toggle being broken rather than as a response arriving late.
+   */
+  it('discards a listing that answers the mode the page is no longer in', () => {
+    const live = new Subject<TemplatesResponse>();
+    const withArchived = new Subject<TemplatesResponse>();
+    TestBed.configureTestingModule({
+      providers: [
+        provideZonelessChangeDetection(),
+        {
+          provide: ApiService,
+          useValue: {
+            templates: (includeArchived = false) => (includeArchived ? withArchived : live),
+          } as unknown as ApiService,
+        },
+      ],
+    });
+    const fixture = TestBed.createComponent(TemplatesPage);
+    fixture.detectChanges();
+
+    // The constructor's listing is still out when the operator asks for the archived ones.
+    (fixture.componentInstance as unknown as PageInternals).toggleArchived();
+    fixture.detectChanges();
+
+    withArchived.next({ templates: [summary({ name: 'retired', archived: true })] });
+    fixture.detectChanges();
+    expect(text(fixture.nativeElement)).toContain('retired');
+
+    // And now the first request finally answers, about a mode the page has left.
+    live.next({ templates: [summary({ name: 'in-use' })] });
+    fixture.detectChanges();
+
+    expect(text(fixture.nativeElement)).toContain('retired');
+    expect(text(fixture.nativeElement)).not.toContain('in-use');
   });
 
   /**

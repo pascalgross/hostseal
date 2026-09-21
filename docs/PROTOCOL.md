@@ -171,7 +171,7 @@ approves another.
 | `400` | Malformed body or CSR |
 | `401` | Token unknown, expired, or already used |
 | `403` | `host_limit_reached` — the fleet is at its host limit; `tenant_suspended` — the fleet is suspended. Neither consumes the token, with one exception: when two machines contend for a fleet's last slot the loser is refused by the atomic check, which happens after redemption, and its message says the token was spent |
-| `409` | A host with this `machineIdHash` is already enrolled; or the requested bootstrap cannot be issued — `no_such_template`, `unsigned_template`, `archived_template`. None of these consumes the token |
+| `409` | A host with this `machineIdHash` is already enrolled; or the requested bootstrap cannot be issued — `no_such_template`, `unsigned_template`, `archived_template`. These are checked before the token is consumed, with one exception: a template archived while the enrolment is in flight is caught again after redemption, and its message says the token was spent |
 | `429` | Rate limited; honour `Retry-After` |
 
 ## 4. `POST /agent/v1/heartbeat`
