@@ -3,7 +3,11 @@ import { provideZonelessChangeDetection } from '@angular/core';
 import { of } from 'rxjs';
 
 import { ApiService } from '../core/api.service';
-import { EnrolmentInstructions } from '../core/api.models';
+import {
+  CreateEnrolmentTokenRequest,
+  EnrolmentInstructions,
+  TemplateSummary,
+} from '../core/api.models';
 import { EnrolPanel } from './enrol-panel';
 
 /** Builds one answer from the control plane, so each spec names only the part it is about. */
@@ -20,6 +24,21 @@ function instructions(partial: Partial<EnrolmentInstructions> = {}): EnrolmentIn
   };
 }
 
+/** Builds one template listing row, so a spec names only what it is about. */
+function template(partial: Partial<TemplateSummary>): TemplateSummary {
+  return {
+    name: 'standard-server',
+    latestVersion: 1,
+    createdAt: '2026-08-24T09:41:07.512Z',
+    createdBy: 'test:tester',
+    signed: true,
+    signerKeyId: 'ops-yubikey-1',
+    signerAlgorithm: 'ecdsa-p256',
+    archived: false,
+    ...partial,
+  };
+}
+
 /**
  * The protected members these specs reach for, named so the casts below stay readable.
  *
@@ -30,8 +49,8 @@ interface PanelInternals {
   /** Reads the instructions, which the disclosure element does on open. */
   load(): void;
 
-  /** Mints one enrolment token. */
-  mint(): void;
+  /** Mints one enrolment token, naming a template when one is given. */
+  mint(bootstrap?: string): void;
 
   /** The page's own address, which the CA command is built against. */
   pageBase(): string;
@@ -50,6 +69,8 @@ interface PanelInternals {
 function render(
   details: EnrolmentInstructions,
   pageBase = 'https://hostseal.example.org/',
+  templates: TemplateSummary[] = [],
+  minted: CreateEnrolmentTokenRequest[] = [],
 ): ComponentFixture<EnrolPanel> {
   TestBed.resetTestingModule();
   TestBed.configureTestingModule({
@@ -59,13 +80,17 @@ function render(
         provide: ApiService,
         useValue: {
           enrolment: () => of(details),
-          createEnrolmentToken: () =>
-            of({
+          templates: () => of({ templates }),
+          createEnrolmentToken: (request: CreateEnrolmentTokenRequest) => {
+            minted.push(request);
+            return of({
               token: 'frr-enrol-abcdef',
-              label: 'from the fleet page',
+              label: request.label,
               group: '',
               expiresAt: '2026-08-29T00:00:00Z',
-            }),
+              ...(request.bootstrap ? { bootstrap: request.bootstrap } : {}),
+            });
+          },
         } as unknown as ApiService,
       },
     ],
@@ -221,6 +246,113 @@ describe('EnrolPanel', () => {
     const rendered = text(fixture.nativeElement);
     expect(rendered).toContain('--token frr-enrol-abcdef');
     expect(rendered).toContain('cannot be shown again');
+  });
+
+  /**
+   * A token for a template is offered only for templates a host could actually be handed.
+   *
+   * The control plane refuses to mint a token naming an unsigned or archived template, and it is
+   * right to: an enrolling host verifies the template's signature against its own trusted-signers,
+   * which this control plane cannot satisfy, and an archived name is refused at enrolment. A menu
+   * that listed those would offer choices that fail — either here, with an error, or on the machine,
+   * which is worse. So the menu is the control plane's rule applied in advance, and a fleet with no
+   * signed template gets the plain button and no menu at all.
+   */
+  it('offers a token only for signed, live templates', () => {
+    const withChoices = render(instructions(), 'https://hostseal.example.org/', [
+      template({ name: 'baseline' }),
+      template({ name: 'unsigned', signed: false }),
+      template({ name: 'retired', archived: true }),
+    ]);
+    const handle = withChoices.nativeElement.querySelector('.hostseal-split__more') as HTMLElement;
+    expect(handle).not.toBeNull();
+    handle.click();
+    withChoices.detectChanges();
+
+    const items = Array.from(document.querySelectorAll('[mat-menu-item]')).map((item) =>
+      text(item),
+    );
+    expect(items).toEqual(['Generate token for baseline']);
+
+    const withoutChoices = render(instructions(), 'https://hostseal.example.org/', [
+      template({ name: 'unsigned', signed: false }),
+    ]);
+    expect(withoutChoices.nativeElement.querySelector('.hostseal-split__more')).toBeNull();
+    expect(text(withoutChoices.nativeElement)).toContain('Generate token');
+  });
+
+  /**
+   * A token minted for a template names it in the request, and the command names it on the host.
+   *
+   * The template is chosen here, by an authenticated operator, and stamped on the token; the command
+   * carries `--bootstrap` and `--signers` together because the agent refuses one without the other.
+   * That pairing is the mechanism rather than a convenience: the trust anchor is a file the operator
+   * puts on the host before anything is fetched, so a control plane that owns the token still cannot
+   * choose what runs. A command that omitted the file would fail on the machine, with an error about
+   * ordering that nothing on this page explains.
+   */
+  it('mints a token for the chosen template and pairs --bootstrap with --signers', () => {
+    const minted: CreateEnrolmentTokenRequest[] = [];
+    const fixture = render(
+      instructions(),
+      'https://hostseal.example.org/',
+      [template({ name: 'baseline', signerKeyId: 'ops-yubikey-1' })],
+      minted,
+    );
+
+    (fixture.componentInstance as unknown as PanelInternals).mint('baseline');
+    fixture.detectChanges();
+
+    expect(minted).toEqual([
+      { label: 'from the fleet page, for baseline', group: '', bootstrap: 'baseline' },
+    ]);
+    const rendered = text(fixture.nativeElement);
+    expect(rendered).toContain('--token frr-enrol-abcdef');
+    expect(rendered).toContain('--signers ./trusted-signers --bootstrap baseline');
+    expect(rendered).toContain('ops-yubikey-1');
+  });
+
+  /**
+   * A plain token sends no template at all, rather than an empty one.
+   *
+   * The two are the same to the control plane today; the assertion is that the panel's default
+   * remains the case it always minted, so a fleet that never signs a template sees no change.
+   */
+  it('mints a plain token with no bootstrap when none is chosen', () => {
+    const minted: CreateEnrolmentTokenRequest[] = [];
+    const fixture = render(
+      instructions(),
+      'https://hostseal.example.org/',
+      [template({ name: 'baseline' })],
+      minted,
+    );
+
+    (fixture.componentInstance as unknown as PanelInternals).mint();
+    fixture.detectChanges();
+
+    expect(minted).toEqual([{ label: 'from the fleet page', group: '' }]);
+    expect(text(fixture.nativeElement)).not.toContain('--bootstrap');
+  });
+
+  /**
+   * A Windows host is not offered a template, and a token that names one is called out there.
+   *
+   * A bootstrap is applied through cloud-init, which a Windows host does not run. The menu that
+   * would mint such a token is withheld on that platform, and a token already minted for a template
+   * is not silently printed into a PowerShell command that cannot honour it.
+   */
+  it('withholds the template menu on Windows and says why a template token will not work there', () => {
+    const fixture = render(instructions(), 'https://hostseal.example.org/', [
+      template({ name: 'baseline' }),
+    ]);
+    (fixture.componentInstance as unknown as PanelInternals).mint('baseline');
+    (fixture.componentInstance as unknown as PanelInternals).showPlatform('windows');
+    fixture.detectChanges();
+
+    expect(fixture.nativeElement.querySelector('.hostseal-split__more')).toBeNull();
+    const rendered = text(fixture.nativeElement);
+    expect(rendered).not.toContain('--bootstrap');
+    expect(rendered).toContain('a Windows host cannot apply one');
   });
 
   /**

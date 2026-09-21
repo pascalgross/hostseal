@@ -16,3 +16,37 @@
 p {
   max-width: 48rem;
 }
+
+// The token button and the menu that widens it, drawn as one control.
+//
+// A split button rather than two: "Generate token" is what nearly every operator wants, and the
+// templates are the exception it opens onto. Putting the menu on a second button of its own would make
+// the plain case a choice, and the choice is the wrong shape — every item in the menu mints a token
+// too, just one that names a template. The two halves share the flat style, touch, and are rounded on
+// the outer corners only, which is what makes them read as one button with a handle rather than as two
+// buttons that happen to be adjacent.
+.hostseal-split {
+  display: inline-flex;
+  align-items: stretch;
+
+  > button:first-child:not(:only-child) {
+    border-start-end-radius: 0;
+    border-end-end-radius: 0;
+  }
+}
+
+.hostseal-split__more {
+  min-width: 0;
+  padding-inline: 0.25rem;
+  border-start-start-radius: 0;
+  border-end-start-radius: 0;
+  // The seam, drawn on the handle so it is visible on the button's own colour: a hairline of the
+  // text colour is what separates one action from the other without the two stopping being one.
+  border-inline-start: 1px solid color-mix(in oklab, currentcolor 35%, transparent);
+
+  // Material gives every flat button an icon margin sized for an icon beside a label; alone, the
+  // arrow sits off-centre with it.
+  mat-icon {
+    margin: 0;
+  }
+}

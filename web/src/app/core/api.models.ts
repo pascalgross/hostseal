@@ -1266,14 +1266,19 @@ export interface MintedEnrolmentToken {
 
   /** When it stops being usable. */
   expiresAt: string;
+
+  /** The provisioning template this token arms, absent for a plain enrolment. */
+  bootstrap?: string;
 }
 
 /**
  * The body of `POST /api/v1/tokens`, as the enrolment instructions send it.
  *
- * The server takes more than this — a lifetime, and a bootstrap template — and the enrolment panel
- * sends neither. A token minted from that panel is for the plain case the panel documents, and arming
- * a Tier 2 bootstrap is a decision made where templates are, not beside a copy button.
+ * The server takes more than this — a lifetime — and the enrolment panel does not send one: a token
+ * minted from the panel is for the case the panel documents, with the control plane's own default
+ * lifetime. The bootstrap is here because the panel is where a host is added, and a host provisioned
+ * from a template is added with a token that names it — minted by an authenticated operator, in
+ * advance, which is what keeps the choice of template out of the hands of whoever holds the token.
  */
 export interface CreateEnrolmentTokenRequest {
   /** A human-readable name, so the token list says what each one was for. */
@@ -1281,6 +1286,15 @@ export interface CreateEnrolmentTokenRequest {
 
   /** The fleet group hosts enrolled with it join. */
   group: string;
+
+  /**
+   * The provisioning template this token may request at enrolment, omitted for none.
+   *
+   * The control plane refuses a name whose latest version is unsigned or archived, so the panel
+   * offers only the templates it would accept — but the refusal is the server's, and the host's own
+   * trusted-signers file is where the decision actually lives.
+   */
+  bootstrap?: string;
 }
 
 /**

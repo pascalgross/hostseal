@@ -3,10 +3,11 @@ import { DatePipe } from '@angular/common';
 import { MatButtonModule } from '@angular/material/button';
 import { MatCardModule } from '@angular/material/card';
 import { MatIconModule } from '@angular/material/icon';
+import { MatMenuModule } from '@angular/material/menu';
 import { MatProgressBarModule } from '@angular/material/progress-bar';
 import { MatTooltipModule } from '@angular/material/tooltip';
 
-import { EnrolmentInstructions, MintedEnrolmentToken } from '../core/api.models';
+import { EnrolmentInstructions, MintedEnrolmentToken, TemplateSummary } from '../core/api.models';
 import { ApiService } from '../core/api.service';
 import { describeError } from '../core/errors';
 
@@ -116,6 +117,7 @@ const windowsCLI = `& '${windowsInstallDir}\\hostseal.exe'`;
     MatButtonModule,
     MatCardModule,
     MatIconModule,
+    MatMenuModule,
     MatProgressBarModule,
     MatTooltipModule,
   ],
@@ -137,6 +139,29 @@ export class EnrolPanel {
 
   /** Why minting failed, empty when it did not. */
   protected readonly mintError = signal('');
+
+  /**
+   * The templates a token could name, null until the listing has answered.
+   *
+   * Read alongside the instructions rather than on demand, because the choice is offered from a menu
+   * and a menu that fills in after it is opened is a menu whose first item moves under the pointer.
+   * A listing that fails leaves this null, and the panel then offers a plain token and nothing else:
+   * enrolment does not depend on templates and must not be blocked by them.
+   */
+  protected readonly templates = signal<TemplateSummary[] | null>(null);
+
+  /**
+   * The templates a token may be minted for: signed, and not withdrawn.
+   *
+   * The same two conditions the control plane checks when a token is minted, applied here so the
+   * menu offers nothing it would refuse. An unsigned template is one no enrolling host would accept —
+   * the host verifies the signature against its own trusted-signers, and this control plane cannot
+   * produce one — and an archived name is refused at enrolment, on the machine, which is the worst
+   * place to find out. The check is repeated on the server; this is the copy that saves a click.
+   */
+  protected readonly bootstraps = computed(() =>
+    (this.templates() ?? []).filter((template) => template.signed && !template.archived),
+  );
 
   /** Whether a request is in flight, so the button can be disabled. */
   protected readonly busy = signal(false);
@@ -434,10 +459,39 @@ export class EnrolPanel {
         'Restart-Service hostseal-agent',
       ].join('\n');
     }
+    const bootstrap = this.minted()?.bootstrap;
+    if (bootstrap) {
+      // `--signers` travels with `--bootstrap` because the agent refuses one without the other, and
+      // the refusal is the mechanism: the template is verified against a key from a file the operator
+      // put on the host, before anything is fetched, so that a control plane which owns the token
+      // still cannot choose what runs. A command that named the template and left the file to a
+      // footnote would fail on the machine with an error about ordering.
+      return [
+        `sudo hostseal enroll --server ${details.agentUrl} --token ${token} \\`,
+        `  --signers ./trusted-signers --bootstrap ${bootstrap}`,
+        'sudo systemctl restart hostseal-agent',
+      ].join('\n');
+    }
     return [
       `sudo hostseal enroll --server ${details.agentUrl} --token ${token}`,
       'sudo systemctl restart hostseal-agent',
     ].join('\n');
+  });
+
+  /**
+   * The template the minted token arms, as the listing describes it, or null for a plain token.
+   *
+   * Looked up rather than remembered from the click, because what the panel has to say about it — the
+   * key that signed it, which the host's trusted-signers file must list — is on the summary and not on
+   * the token. A template that vanished from the listing between minting and now still leaves the
+   * name in the command; only the sentence about the key is lost.
+   */
+  protected readonly mintedBootstrap = computed(() => {
+    const name = this.minted()?.bootstrap;
+    if (!name) {
+      return null;
+    }
+    return this.templates()?.find((template) => template.name === name) ?? null;
   });
 
   /** Where the CA certificate can be downloaded, for an operator who would rather have the file. */
@@ -465,19 +519,32 @@ export class EnrolPanel {
       },
       error: (err: unknown) => this.error.set(describeError(err)),
     });
+    this.api.templates().subscribe({
+      next: (listing) => this.templates.set(listing.templates),
+      // Silently: a token menu with one fewer option is what a failed listing costs, and enrolment
+      // must not read as broken because a page about templates could not be loaded.
+      error: () => this.templates.set(null),
+    });
   }
 
   /**
-   * Mints one single-use enrolment token.
+   * Mints one single-use enrolment token, plain or naming a template it may request.
    *
    * The result is shown once and never again — only its SHA-256 is stored — which the panel says at
    * the moment it is shown rather than in a footnote. A token nobody copied is not recoverable and is
    * not a problem: minting another costs one click.
+   *
+   * The template is decided here, by whoever is signed in, and stamped on the token: the host that
+   * redeems it may request that template and no other. It could not be otherwise — a token that let
+   * its holder choose would let anybody who found one choose what runs as root on a new machine. The
+   * label says which it was, so the token list can tell a plain token from an armed one.
    */
-  protected mint(): void {
+  protected mint(bootstrap = ''): void {
     this.busy.set(true);
     this.mintError.set('');
-    this.api.createEnrolmentToken({ label: 'from the fleet page', group: '' }).subscribe({
+    const label = bootstrap ? `from the fleet page, for ${bootstrap}` : 'from the fleet page';
+    const request = bootstrap ? { label, group: '', bootstrap } : { label, group: '' };
+    this.api.createEnrolmentToken(request).subscribe({
       next: (token) => {
         this.busy.set(false);
         this.minted.set(token);
