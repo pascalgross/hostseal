@@ -410,7 +410,14 @@ export interface CreateReadJobRequest {
   /** The catalogue member, which must be a read intent for a request this shape. */
   intent: string;
 
-  /** The parameter object. Every read intent takes an empty one. */
+  /**
+   * The parameter object.
+   *
+   * Every operation this shape can queue today — the four reports and the routine security update —
+   * takes an empty one, and the decoders are strict: a field none of them knows is refused by the
+   * control plane before any host sees it. The object is still sent rather than assumed, so that a
+   * catalogue member that does take parameters is queued the same way as everything else.
+   */
   params: Record<string, unknown>;
 }
 
@@ -1266,14 +1273,61 @@ export interface MintedEnrolmentToken {
 
   /** When it stops being usable. */
   expiresAt: string;
+
+  /** The provisioning template this token arms, absent for a plain enrolment. */
+  bootstrap?: string;
 }
 
 /**
- * The body of `POST /api/v1/tokens`, as the enrolment instructions send it.
+ * One enrolment token as the list shows it: everything about it except the secret.
  *
- * The server takes more than this — a lifetime, and a bootstrap template — and the enrolment panel
- * sends neither. A token minted from that panel is for the plain case the panel documents, and arming
- * a Tier 2 bootstrap is a decision made where templates are, not beside a copy button.
+ * Only the SHA-256 of a token is stored, so this can never carry the value — which is the property
+ * that makes a listing safe to show at all. What it can say is what each token was minted for, whether
+ * it has been spent and by which host, and whether it could still be redeemed. That last one is the
+ * question a listing exists to answer: a token that was minted, not used and not yet expired is a
+ * standing invitation into the fleet, and an operator should be able to see how many are open.
+ */
+export interface EnrolmentTokenSummary {
+  /** What the operator called it. */
+  label: string;
+
+  /** The fleet group hosts enrolled with it join. */
+  group: string;
+
+  /** When it was minted. */
+  createdAt: string;
+
+  /** When it stops working. */
+  expiresAt: string;
+
+  /** Whether it has been redeemed. */
+  consumed: boolean;
+
+  /** The host that redeemed it, absent while it is unused. */
+  consumedByHost?: string;
+
+  /** Whether it could still be redeemed: unused and not yet expired. */
+  usable: boolean;
+
+  /** The provisioning template it arms, absent for a plain token. */
+  bootstrap?: string;
+}
+
+/** The response of `GET /api/v1/tokens`. */
+export interface EnrolmentTokensResponse {
+  /** Every token minted in this fleet, newest first. */
+  tokens: EnrolmentTokenSummary[];
+}
+
+/**
+ * The body of `POST /api/v1/tokens`, as the enrolment panel sends it.
+ *
+ * Everything the server takes. The bootstrap is here because the panel is where a host is added, and
+ * a host provisioned from a template is added with a token that names it — minted by an authenticated
+ * operator, in advance, which is what keeps the choice of template out of the hands of whoever holds
+ * the token. The lifetime is here because a token is a standing invitation until it is spent or
+ * expires, and a day is the wrong answer both for a machine being built this minute and for one
+ * arriving next week.
  */
 export interface CreateEnrolmentTokenRequest {
   /** A human-readable name, so the token list says what each one was for. */
@@ -1281,6 +1335,18 @@ export interface CreateEnrolmentTokenRequest {
 
   /** The fleet group hosts enrolled with it join. */
   group: string;
+
+  /** How long the token stays redeemable, in seconds; omitted for the control plane's default. */
+  ttlSeconds?: number;
+
+  /**
+   * The provisioning template this token may request at enrolment, omitted for none.
+   *
+   * The control plane refuses a name whose latest version is unsigned or archived, so the panel
+   * offers only the templates it would accept — but the refusal is the server's, and the host's own
+   * trusted-signers file is where the decision actually lives.
+   */
+  bootstrap?: string;
 }
 
 /**

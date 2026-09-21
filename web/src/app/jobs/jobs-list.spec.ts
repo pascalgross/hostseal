@@ -60,6 +60,18 @@ interface Writable<T> {
  * through a component library is a test of that library.
  */
 interface PageInternals {
+  /** The host the report form is about. */
+  chosenHost: Writable<string>;
+
+  /** The operation the report form is about. */
+  chosenIntent: Writable<string>;
+
+  /** The parameters for the report form, as JSON. */
+  readParams: Writable<string>;
+
+  /** Queues what the report form holds. */
+  createJob(): void;
+
   /** The host the destructive form is about. */
   signHost: Writable<string>;
 
@@ -141,6 +153,50 @@ function fill(fixture: ComponentFixture<JobsList>): PageInternals {
   page.signValidMinutes.set(30);
   return page;
 }
+
+describe('JobsList report form', () => {
+  /**
+   * The parameters typed into the report form reach the control plane as the object they describe,
+   * and a field that is not JSON stops the request before it leaves.
+   *
+   * Every operation the form can queue today takes an empty object, so the field's value is nearly
+   * always `{}` — but "nearly always" is how a parameter that mattered gets silently dropped: the
+   * form used to send an empty object whatever was on screen. The parse is asserted from both sides
+   * because a form that sent the text unparsed would fail every request the same way.
+   */
+  it('sends the parameters as an object, and refuses text that is not JSON', () => {
+    const queued: Record<string, unknown>[] = [];
+    const fixture = render(
+      {},
+      {
+        createReadJob: (request: Record<string, unknown>) => {
+          queued.push(request);
+          return of({});
+        },
+      },
+    );
+    const page = fixture.componentInstance as unknown as PageInternals;
+    page.chosenHost.set('01JHOST00000000000000000000');
+    page.chosenIntent.set('services.list');
+
+    page.readParams.set('{"unit": "nginx.service",}');
+    page.createJob();
+    fixture.detectChanges();
+    expect(queued.length).toBe(0);
+    expect(text(fixture.nativeElement)).toContain('not valid JSON');
+
+    page.readParams.set('{"unit": "nginx.service"}');
+    page.createJob();
+    fixture.detectChanges();
+    expect(queued).toEqual([
+      {
+        hostId: '01JHOST00000000000000000000',
+        intent: 'services.list',
+        params: { unit: 'nginx.service' },
+      },
+    ]);
+  });
+});
 
 describe('JobsList destructive signing', () => {
   /**

@@ -198,6 +198,22 @@ export class TemplatesPage {
   protected readonly signerState = signal<'' | 'finding' | 'waiting'>('');
 
   /**
+   * Whether the terminal path — the command to run, the file to run it on, the box to paste into —
+   * is on screen under the Signature card.
+   *
+   * Off by default and opened by a button, or by a signer that could not be reached. The signer is
+   * the shorter path and the one the card is written around; the terminal is the same signature with
+   * two more steps, for the operator with no signer running or one who would rather see the command.
+   */
+  protected readonly showTerminalPath = signal(false);
+
+  /** A signed template pasted in from a terminal, empty when none is. */
+  protected readonly pastedTemplate = signal('');
+
+  /** Why the pasted document could not be stored, empty when it was. */
+  protected readonly pasteError = signal('');
+
+  /**
    * Whether the archive confirmation is showing for the open template.
    *
    * Confirmed rather than done on one click, which is the opposite of how a wallboard share is
@@ -248,6 +264,40 @@ export class TemplatesPage {
 
   /** Whether anything at all may be asked of the signer right now. */
   protected readonly canSign = computed(() => this.signerState() === '' && !this.busy());
+
+  /**
+   * The file name the open version's body is offered under, for `hostseal sign-template --body`.
+   *
+   * The name and the version are in it so that the file on an operator's disk says which bytes it
+   * holds: the command below signs whatever file it is pointed at, and two templates saved as
+   * `body.yaml` are how the wrong one gets signed.
+   */
+  protected readonly bodyFileName = computed(() => {
+    const record = this.opened();
+    return record ? `${record.name}-v${record.version}.yaml` : '';
+  });
+
+  /**
+   * The `hostseal sign-template` command for the open version.
+   *
+   * The same act the Sign button performs, written out: the same canonical {name, body} document is
+   * signed, by the same kind of key, and the control plane stores the same triple. It exists for the
+   * operator with no signer running, for the one who would rather see the command than trust a button,
+   * and for both to be able to check that the page and the terminal are asking for the same thing.
+   * The key reference is left as a placeholder because it is the one part that belongs to the person
+   * rather than to the template.
+   */
+  protected readonly signTemplateCommand = computed(() => {
+    const record = this.opened();
+    if (!record) {
+      return '';
+    }
+    return (
+      `hostseal sign-template --key <your key> \\\n` +
+      `  --name ${record.name} \\\n` +
+      `  --body ${this.bodyFileName()}`
+    );
+  });
 
   /** Loads the template list. */
   constructor() {
@@ -533,6 +583,7 @@ export class TemplatesPage {
     this.api.createTemplate(request).subscribe({
       next: (stored) => {
         this.busy.set(false);
+        this.pastedTemplate.set('');
         this.reload();
         // Re-read rather than opening the create response. That response confirms what was stored
         // and does not echo the body, so trusting it would leave the pane blank and the editor
@@ -569,6 +620,8 @@ export class TemplatesPage {
         this.signerState.set('');
         this.signerStatus.set(null);
         this.signerError.set(describeSignerError(err, this.origin));
+        // The terminal is the answer to a signer that is not there, so it opens without being asked.
+        this.showTerminalPath.set(true);
       },
     });
   }
@@ -635,7 +688,117 @@ export class TemplatesPage {
       error: (err: unknown) => {
         this.signerState.set('');
         this.signerError.set(describeSignerError(err, this.origin));
+        if (where === 'version') {
+          this.showTerminalPath.set(true);
+        }
       },
+    });
+  }
+
+  /** Shows or hides the terminal path under the Signature card. */
+  protected toggleTerminalPath(): void {
+    this.showTerminalPath.update((shown) => !shown);
+  }
+
+  /**
+   * Copies the `hostseal sign-template` command to the clipboard.
+   *
+   * Best-effort and never reported as a failure: the command is on screen and selectable, and a
+   * browser refusing clipboard access must not look like something went wrong with the template.
+   */
+  protected async copySignTemplateCommand(): Promise<void> {
+    if (!navigator.clipboard) {
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(this.signTemplateCommand());
+    } catch {
+      // Left on screen for a manual copy, which is the fallback that always works.
+    }
+  }
+
+  /**
+   * Hands the open version's body to the browser as a file, for `--body`.
+   *
+   * A download rather than a copy, because the signature covers the exact bytes and a body that went
+   * through a clipboard, an editor and a save dialog is a body with a trailing newline or a tab
+   * somewhere it was not — signed correctly, stored as a new version, and refused by no host, but not
+   * the version the operator thought they were signing. A file written by the browser holds what the
+   * control plane holds.
+   *
+   * The object URL is revoked once the click has been dispatched: the blob lives as long as the page
+   * otherwise, and a template is small but an operator signs more than one.
+   */
+  protected downloadBody(): void {
+    const record = this.opened();
+    if (!record) {
+      return;
+    }
+    const url = URL.createObjectURL(new Blob([record.body], { type: 'text/plain;charset=utf-8' }));
+    try {
+      const anchor = document.createElement('a');
+      anchor.href = url;
+      anchor.download = this.bodyFileName();
+      anchor.click();
+    } finally {
+      URL.revokeObjectURL(url);
+    }
+  }
+
+  /**
+   * Stores a signed template that was produced in a terminal and pasted in.
+   *
+   * The document goes to the control plane as it arrived, which is what `hostseal sign-template`
+   * itself tells the operator to do with it. Nothing here inspects or improves the body: the
+   * signature covers the name and the body together, so a page that corrected either would produce
+   * a version that reads as signed here and is refused by every host.
+   *
+   * The name is checked against the open template, and it is the only thing checked. A signature is
+   * only about the template it was made for, and storing one against another name is the one
+   * mistake this page can make that no host could explain — the same check the signer path makes on
+   * the name the signer echoes back. The body is not compared: the operator read it in full in the
+   * terminal before confirming, and what they signed is what is stored, as the next version.
+   */
+  protected storePasted(): void {
+    const record = this.opened();
+    if (!record) {
+      return;
+    }
+    let document: CreateTemplateRequest;
+    try {
+      document = JSON.parse(this.pastedTemplate()) as CreateTemplateRequest;
+    } catch {
+      this.pasteError.set(
+        'That is not valid JSON. Paste the whole document `hostseal sign-template` printed, braces ' +
+          'included.',
+      );
+      return;
+    }
+    if (!document?.signature || !document?.signerKeyId || !document?.signerAlgorithm) {
+      this.pasteError.set(
+        'That document carries no signature, so it is not what `hostseal sign-template` prints. ' +
+          'Paste its output whole.',
+      );
+      return;
+    }
+    if (document.name !== record.name) {
+      this.pasteError.set(
+        `That document signs "${document.name}" and this card is about "${record.name}". Nothing ` +
+          'was stored: a signature is only about the template it was made for.',
+      );
+      return;
+    }
+    if (typeof document.body !== 'string' || document.body.length === 0) {
+      this.pasteError.set('That document carries no body. Paste the whole of what was printed.');
+      return;
+    }
+    this.pasteError.set('');
+    this.store({
+      name: document.name,
+      body: document.body,
+      signature: document.signature,
+      signerKeyId: document.signerKeyId,
+      signerAlgorithm: document.signerAlgorithm,
     });
   }
 

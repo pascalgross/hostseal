@@ -313,9 +313,60 @@
             @if (signerError() && signerWhere() === 'version') {
               <pre class="m-0 text-hostseal-bad whitespace-pre-wrap">{{ signerError() }}</pre>
             }
+
+            @if (showTerminalPath()) {
+              <div class="flex flex-col gap-3 pt-2">
+                <p class="m-0 opacity-80">
+                  The same signature with two more steps, and the way to make it when the signer is
+                  not running. Save this version's body as a file, run the command where your key is
+                  — it prints the body in full and asks before signing — then paste what it prints
+                  back here. The signature covers the name and the body together, so this page
+                  stores the document exactly as it arrived, as the next version.
+                </p>
+
+                <div>
+                  <button mat-stroked-button type="button" (click)="downloadBody()">
+                    <mat-icon>download</mat-icon>
+                    Save the body as {{ bodyFileName() }}
+                  </button>
+                </div>
+
+                <pre class="m-0 text-xs"><code>{{ signTemplateCommand() }}</code></pre>
+
+                <div>
+                  <button mat-button type="button" (click)="copySignTemplateCommand()">
+                    <mat-icon>content_copy</mat-icon>
+                    Copy the command
+                  </button>
+                </div>
+
+                <mat-form-field appearance="outline">
+                  <mat-label>The signed template it printed</mat-label>
+                  <textarea matInput rows="8" spellcheck="false"
+                            [ngModel]="pastedTemplate()"
+                            (ngModelChange)="pastedTemplate.set($event)"></textarea>
+                  <mat-hint>The whole JSON document, braces included.</mat-hint>
+                </mat-form-field>
+
+                @if (pasteError()) {
+                  <p class="m-0 text-hostseal-bad">{{ pasteError() }}</p>
+                }
+
+                <div>
+                  <button mat-flat-button type="button"
+                          [disabled]="busy() || pastedTemplate().length === 0"
+                          (click)="storePasted()">
+                    Store the signed version
+                  </button>
+                </div>
+              </div>
+            }
           </mat-card-content>
 
           <mat-card-actions align="end">
+            <button mat-button type="button" (click)="toggleTerminalPath()">
+              {{ showTerminalPath() ? 'Hide the terminal way' : 'Sign in a terminal instead' }}
+            </button>
             <button mat-button [disabled]="!canSign()" (click)="findSigner()">
               {{ signerStatus() ? 'Check again' : 'Find my signer' }}
             </button>

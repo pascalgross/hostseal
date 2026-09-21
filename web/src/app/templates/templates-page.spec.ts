@@ -524,6 +524,18 @@ interface SigningInternals {
 
   /** Signs the open version and stores the result as the next one. */
   signOpen(): void;
+
+  /** Shows or hides the terminal way, which the Signature card's button does. */
+  toggleTerminalPath(): void;
+
+  /** What was pasted from a terminal, which the textarea writes. */
+  pastedTemplate: {
+    /** Replaces the pasted text, as typing into the textarea does. */
+    set(value: string): void;
+  };
+
+  /** Stores the pasted document, which the button under the textarea does. */
+  storePasted(): void;
 }
 
 /** A local signer that answers, or fails the way a missing one does. */
@@ -685,6 +697,106 @@ describe('TemplatesPage signing', () => {
 
     expect(stored.length).toBe(0);
     expect(text(fixture.nativeElement)).toContain('something-else');
+  });
+
+  /**
+   * The terminal is the same signature with two more steps, and the card offers it as one.
+   *
+   * The Jobs page has had this since the signer arrived; the Signature card had only the button, so
+   * an operator with no signer running — or one who would rather read the command than trust a
+   * button — had to work out `hostseal sign-template` from the documentation. The command is asserted
+   * on its two arguments that belong to the template rather than to the person: the name, which the
+   * signature covers, and the file the body is offered under, which names the version so that the
+   * file on somebody's disk says which bytes it holds.
+   */
+  it('offers the terminal way, naming the template and the file its body is saved as', () => {
+    const fixture = renderWithSigner(version({ name: 'standard-server', version: 3 }), {});
+    expect(text(fixture.nativeElement)).toContain('Sign in a terminal instead');
+    expect(text(fixture.nativeElement)).not.toContain('hostseal sign-template');
+
+    (fixture.componentInstance as unknown as SigningInternals).toggleTerminalPath();
+    fixture.detectChanges();
+
+    const whole = text(fixture.nativeElement);
+    expect(whole).toContain('hostseal sign-template --key <your key>');
+    expect(whole).toContain('--name standard-server');
+    expect(whole).toContain('--body standard-server-v3.yaml');
+    expect(whole).toContain('Save the body as standard-server-v3.yaml');
+  });
+
+  /**
+   * A pasted document is stored as it arrived, and refused when it is about another template.
+   *
+   * Unchanged, because the signature covers the name and the body together and a page that corrected
+   * either would store a version every host refuses. The name is the one thing checked, and it is
+   * the same check the signer path makes on the echoed name: a signature stored against a template
+   * it was not made for is the one mistake here that nothing on a host could explain.
+   */
+  it('stores a pasted signed template unchanged, and refuses one about another template', () => {
+    const stored: Record<string, unknown>[] = [];
+    const fixture = renderWithSigner(version({ name: 'standard-server' }), {}, {
+      createTemplate: (request: Record<string, unknown>) => {
+        stored.push(request);
+        return of({ name: 'standard-server', version: 4, signed: true });
+      },
+    });
+    const page = fixture.componentInstance as unknown as SigningInternals;
+    page.toggleTerminalPath();
+
+    page.pastedTemplate.set(
+      JSON.stringify({
+        name: 'something-else',
+        body: '#cloud-config\n',
+        signature: 'c2ln',
+        signerKeyId: 'ops-yubikey-1',
+        signerAlgorithm: 'ed25519',
+      }),
+    );
+    page.storePasted();
+    fixture.detectChanges();
+
+    expect(stored.length).toBe(0);
+    expect(text(fixture.nativeElement)).toContain('this card is about "standard-server"');
+
+    page.pastedTemplate.set(
+      JSON.stringify({
+        name: 'standard-server',
+        body: '#cloud-config\nhostname: x\n',
+        signature: 'c2lnbmF0dXJl',
+        signerKeyId: 'ops-yubikey-1',
+        signerAlgorithm: 'ecdsa-p256',
+      }),
+    );
+    page.storePasted();
+    fixture.detectChanges();
+
+    expect(stored).toEqual([
+      {
+        name: 'standard-server',
+        body: '#cloud-config\nhostname: x\n',
+        signature: 'c2lnbmF0dXJl',
+        signerKeyId: 'ops-yubikey-1',
+        signerAlgorithm: 'ecdsa-p256',
+      },
+    ]);
+  });
+
+  /**
+   * A signer that cannot be reached opens the terminal way by itself, as the Jobs page does.
+   *
+   * The message about starting a signer is the answer for an operator who has one; the command is the
+   * answer for one who does not, and it should not be behind a second click when the first one has
+   * just failed.
+   */
+  it('opens the terminal way when no signer answers', () => {
+    const fixture = renderWithSigner(version({}), {
+      status: () => throwError(() => ({ status: 0 })),
+    });
+
+    (fixture.componentInstance as unknown as SigningInternals).findSigner();
+    fixture.detectChanges();
+
+    expect(text(fixture.nativeElement)).toContain('hostseal sign-template --key');
   });
 
   /**

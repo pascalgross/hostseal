@@ -25,6 +25,19 @@
           · {{ rebootCount() }} awaiting reboot
         }
       </p>
+
+      <p class="m-0 ml-auto flex items-center gap-1 text-xs opacity-70 hostseal-numeric">
+        @if (refreshError()) {
+          <mat-icon class="!w-4 !h-4 !text-base text-hostseal-warn" aria-hidden="true">warning_amber</mat-icon>
+          <span>last refresh failed, showing {{ refreshedClock() }}: {{ refreshError() }}</span>
+        } @else {
+          <span>updated {{ refreshedClock() }}, every {{ refreshSeconds() }}s</span>
+        }
+        <button mat-icon-button type="button" class="!w-8 !h-8" [disabled]="refreshing()"
+                aria-label="Refresh the fleet now" matTooltip="Refresh now" (click)="read()">
+          <mat-icon class="!w-4 !h-4 !text-base" aria-hidden="true">refresh</mat-icon>
+        </button>
+      </p>
     </header>
 
     <hostseal-enrol-panel class="block mb-6" />

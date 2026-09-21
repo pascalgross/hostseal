@@ -1,12 +1,23 @@
 import { Component, computed, inject, signal } from '@angular/core';
 import { DatePipe } from '@angular/common';
+import { FormsModule } from '@angular/forms';
 import { MatButtonModule } from '@angular/material/button';
 import { MatCardModule } from '@angular/material/card';
+import { MatFormFieldModule } from '@angular/material/form-field';
 import { MatIconModule } from '@angular/material/icon';
+import { MatInputModule } from '@angular/material/input';
+import { MatMenuModule } from '@angular/material/menu';
 import { MatProgressBarModule } from '@angular/material/progress-bar';
+import { MatTableModule } from '@angular/material/table';
 import { MatTooltipModule } from '@angular/material/tooltip';
 
-import { EnrolmentInstructions, MintedEnrolmentToken } from '../core/api.models';
+import {
+  CreateEnrolmentTokenRequest,
+  EnrolmentInstructions,
+  EnrolmentTokenSummary,
+  MintedEnrolmentToken,
+  TemplateSummary,
+} from '../core/api.models';
 import { ApiService } from '../core/api.service';
 import { describeError } from '../core/errors';
 
@@ -113,10 +124,15 @@ const windowsCLI = `& '${windowsInstallDir}\\hostseal.exe'`;
   selector: 'hostseal-enrol-panel',
   imports: [
     DatePipe,
+    FormsModule,
     MatButtonModule,
     MatCardModule,
+    MatFormFieldModule,
     MatIconModule,
+    MatInputModule,
+    MatMenuModule,
     MatProgressBarModule,
+    MatTableModule,
     MatTooltipModule,
   ],
   templateUrl: './enrol-panel.html',
@@ -137,6 +153,78 @@ export class EnrolPanel {
 
   /** Why minting failed, empty when it did not. */
   protected readonly mintError = signal('');
+
+  /**
+   * What the next token will be called, empty for the panel's own default.
+   *
+   * A label is how a token is told apart in the list below once the value itself is gone, and "from
+   * the fleet page" told nothing apart. Optional rather than required, because a fleet with one
+   * operator adding one host has nothing to tell apart and should not be asked to invent a name.
+   */
+  protected readonly tokenLabel = signal('');
+
+  /** The fleet group a host enrolled with the next token joins, empty for none. */
+  protected readonly tokenGroup = signal('');
+
+  /**
+   * How many hours the next token stays redeemable, empty for the control plane's default of a day.
+   *
+   * Hours rather than seconds because that is the unit the decision is made in: an hour for a machine
+   * being built now, a week for one arriving with the next delivery. A token that is minted, not
+   * spent and not yet expired is a standing invitation into the fleet, and the length of that
+   * invitation should be the operator's choice rather than the server's.
+   */
+  protected readonly tokenHours = signal<number | null>(null);
+
+  /**
+   * Every token minted in this fleet, newest first, null until the listing has answered.
+   *
+   * The value of a token exists only where it was copied, so this cannot show one — and does not
+   * need to. What it answers is which invitations into the fleet are still open, which were spent
+   * and by whom, and which expired unused; before it, the only way to know was a database query.
+   */
+  protected readonly tokens = signal<EnrolmentTokenSummary[] | null>(null);
+
+  /** Why the token listing could not be read, empty when it could. */
+  protected readonly tokensError = signal('');
+
+  /**
+   * Which read of the token listing is the current one.
+   *
+   * The listing is read on open and again after every mint, and the two can be in flight together:
+   * an operator who opens the panel and mints at once has the first read still on its way when the
+   * second is answered. Without this, the older answer lands last and the token just minted is
+   * missing from the list until the next mint — which is a listing being wrong about the one row the
+   * operator is looking for. Each read takes a number, and an answer to any read but the latest is
+   * dropped.
+   */
+  private tokensRead = 0;
+
+  /** The columns of the token listing, in order. */
+  protected readonly tokenColumns = ['label', 'group', 'bootstrap', 'created', 'state'];
+
+  /**
+   * The templates a token could name, null until the listing has answered.
+   *
+   * Read alongside the instructions rather than on demand, because the choice is offered from a menu
+   * and a menu that fills in after it is opened is a menu whose first item moves under the pointer.
+   * A listing that fails leaves this null, and the panel then offers a plain token and nothing else:
+   * enrolment does not depend on templates and must not be blocked by them.
+   */
+  protected readonly templates = signal<TemplateSummary[] | null>(null);
+
+  /**
+   * The templates a token may be minted for: signed, and not withdrawn.
+   *
+   * The same two conditions the control plane checks when a token is minted, applied here so the
+   * menu offers nothing it would refuse. An unsigned template is one no enrolling host would accept —
+   * the host verifies the signature against its own trusted-signers, and this control plane cannot
+   * produce one — and an archived name is refused at enrolment, on the machine, which is the worst
+   * place to find out. The check is repeated on the server; this is the copy that saves a click.
+   */
+  protected readonly bootstraps = computed(() =>
+    (this.templates() ?? []).filter((template) => template.signed && !template.archived),
+  );
 
   /** Whether a request is in flight, so the button can be disabled. */
   protected readonly busy = signal(false);
@@ -434,10 +522,39 @@ export class EnrolPanel {
         'Restart-Service hostseal-agent',
       ].join('\n');
     }
+    const bootstrap = this.minted()?.bootstrap;
+    if (bootstrap) {
+      // `--signers` travels with `--bootstrap` because the agent refuses one without the other, and
+      // the refusal is the mechanism: the template is verified against a key from a file the operator
+      // put on the host, before anything is fetched, so that a control plane which owns the token
+      // still cannot choose what runs. A command that named the template and left the file to a
+      // footnote would fail on the machine with an error about ordering.
+      return [
+        `sudo hostseal enroll --server ${details.agentUrl} --token ${token} \\`,
+        `  --signers ./trusted-signers --bootstrap ${bootstrap}`,
+        'sudo systemctl restart hostseal-agent',
+      ].join('\n');
+    }
     return [
       `sudo hostseal enroll --server ${details.agentUrl} --token ${token}`,
       'sudo systemctl restart hostseal-agent',
     ].join('\n');
+  });
+
+  /**
+   * The template the minted token arms, as the listing describes it, or null for a plain token.
+   *
+   * Looked up rather than remembered from the click, because what the panel has to say about it — the
+   * key that signed it, which the host's trusted-signers file must list — is on the summary and not on
+   * the token. A template that vanished from the listing between minting and now still leaves the
+   * name in the command; only the sentence about the key is lost.
+   */
+  protected readonly mintedBootstrap = computed(() => {
+    const name = this.minted()?.bootstrap;
+    if (!name) {
+      return null;
+    }
+    return this.templates()?.find((template) => template.name === name) ?? null;
   });
 
   /** Where the CA certificate can be downloaded, for an operator who would rather have the file. */
@@ -465,22 +582,100 @@ export class EnrolPanel {
       },
       error: (err: unknown) => this.error.set(describeError(err)),
     });
+    this.api.templates().subscribe({
+      next: (listing) => this.templates.set(listing.templates),
+      // Silently: a token menu with one fewer option is what a failed listing costs, and enrolment
+      // must not read as broken because a page about templates could not be loaded.
+      error: () => this.templates.set(null),
+    });
+    this.loadTokens();
   }
 
   /**
-   * Mints one single-use enrolment token.
+   * Reads the token listing, on open and again after every mint.
+   *
+   * Re-read rather than appended to from the mint response, because the response and the listing
+   * are different views of the same row — the response carries the secret and the listing carries
+   * the state — and only the control plane knows whether a token minted a moment ago has already
+   * been spent by a host that was waiting for it.
+   */
+  protected loadTokens(): void {
+    const read = ++this.tokensRead;
+    this.api.enrolmentTokens().subscribe({
+      next: (listing) => {
+        if (read !== this.tokensRead) {
+          return;
+        }
+        this.tokens.set(listing.tokens);
+        this.tokensError.set('');
+      },
+      error: (err: unknown) => {
+        if (read === this.tokensRead) {
+          this.tokensError.set(describeError(err));
+        }
+      },
+    });
+  }
+
+  /**
+   * One phrase for where a token stands: open, spent, or expired unused.
+   *
+   * Three states rather than the two booleans the control plane sends, because "not usable" alone
+   * conflates the token a host redeemed with the one nobody ever did, and those are different
+   * findings — one is a host in the fleet, the other is an invitation that was left open for a day.
+   */
+  protected tokenState(token: EnrolmentTokenSummary): string {
+    if (token.consumed) {
+      return token.consumedByHost ? `used by ${token.consumedByHost}` : 'used';
+    }
+    return token.usable ? 'open' : 'expired unused';
+  }
+
+  /**
+   * Mints one single-use enrolment token, plain or naming a template it may request.
    *
    * The result is shown once and never again — only its SHA-256 is stored — which the panel says at
    * the moment it is shown rather than in a footnote. A token nobody copied is not recoverable and is
    * not a problem: minting another costs one click.
+   *
+   * The template is decided here, by whoever is signed in, and stamped on the token: the host that
+   * redeems it may request that template and no other. It could not be otherwise — a token that let
+   * its holder choose would let anybody who found one choose what runs as root on a new machine. The
+   * label says which it was, so the token list can tell a plain token from an armed one.
    */
-  protected mint(): void {
+  protected mint(bootstrap = ''): void {
+    const request: CreateEnrolmentTokenRequest = {
+      label:
+        this.tokenLabel().trim() ||
+        (bootstrap ? `from the fleet page, for ${bootstrap}` : 'from the fleet page'),
+      group: this.tokenGroup().trim(),
+    };
+    // An empty field is the control plane's default and is sent as nothing. Anything else has to be
+    // a whole positive number of hours, and a value that is not — zero, a negative, a fraction of an
+    // hour, or the NaN a half-typed field reads as — refuses the mint rather than falling back to the
+    // default: the control plane takes a missing lifetime to mean a day, so a token minted against
+    // "0" would be a day-long invitation the operator asked to be no such thing.
+    const hours = this.tokenHours();
+    if (hours !== null) {
+      if (!Number.isInteger(hours) || hours <= 0) {
+        this.mintError.set(
+          'The lifetime has to be a whole number of hours, at least 1. Leave it empty for the ' +
+            "control plane's default.",
+        );
+        return;
+      }
+      request.ttlSeconds = hours * 3600;
+    }
+    if (bootstrap) {
+      request.bootstrap = bootstrap;
+    }
     this.busy.set(true);
     this.mintError.set('');
-    this.api.createEnrolmentToken({ label: 'from the fleet page', group: '' }).subscribe({
+    this.api.createEnrolmentToken(request).subscribe({
       next: (token) => {
         this.busy.set(false);
         this.minted.set(token);
+        this.loadTokens();
       },
       error: (err: unknown) => {
         this.busy.set(false);

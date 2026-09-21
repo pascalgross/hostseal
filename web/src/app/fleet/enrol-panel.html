@@ -122,24 +122,91 @@
             plane from its enrolment, and sending nothing.
           </p>
 
+          @if (platform() !== 'windows' && bootstraps().length > 0) {
+            <p class="m-0 text-sm opacity-80">
+              A token can also name a signed provisioning template. The host applies it once, as
+              root, through cloud-init — after verifying its signature against a
+              <code>trusted-signers</code> file you pass on the command line, which must list the key
+              that signed it. That file establishes the trust anchor before anything is fetched, so a
+              control plane that owns the token still cannot choose what runs.
+            </p>
+          }
+
           @if (minted(); as token) {
             <p class="m-0 text-sm">
               <span class="font-medium">Shown once.</span>
               This token is not stored and cannot be shown again. It expires
               {{ token.expiresAt | date: 'medium' }}.
+              @if (token.bootstrap) {
+                It arms the template <code>{{ token.bootstrap }}</code>, which the host will apply
+                once at enrolment
+                @if (mintedBootstrap()?.signerKeyId; as keyId) {
+                  — if <code>{{ keyId }}</code>, the key that signed it, is in the
+                  <code>trusted-signers</code> file the command names.
+                } @else {
+                  — if the key that signed it is in the <code>trusted-signers</code> file the
+                  command names.
+                }
+              }
             </p>
+            @if (token.bootstrap && platform() === 'windows') {
+              <p class="m-0 text-sm text-hostseal-warn">
+                This token names a template, and a Windows host cannot apply one: a bootstrap runs
+                through cloud-init. Enrol a Debian or Ubuntu host with it, or generate a plain token.
+              </p>
+            }
           }
 
           <pre class="m-0 p-3 rounded bg-black/5 dark:bg-white/10 text-sm overflow-x-auto"><code>{{ enrolCommand() }}</code></pre>
+
+          <div class="flex flex-wrap gap-4 items-start mt-2">
+            <mat-form-field appearance="outline" class="grow min-w-56">
+              <mat-label>Label</mat-label>
+              <input matInput autocomplete="off" spellcheck="false"
+                     [ngModel]="tokenLabel()" (ngModelChange)="tokenLabel.set($event)" />
+              <mat-hint>What the token was for, so the list below can tell it apart.</mat-hint>
+            </mat-form-field>
+
+            <mat-form-field appearance="outline" class="grow min-w-56">
+              <mat-label>Group</mat-label>
+              <input matInput autocomplete="off" spellcheck="false"
+                     [ngModel]="tokenGroup()" (ngModelChange)="tokenGroup.set($event)" />
+              <mat-hint>The fleet group the host joins. Leave empty for none.</mat-hint>
+            </mat-form-field>
+
+            <mat-form-field appearance="outline" class="w-64">
+              <mat-label>Valid for (hours)</mat-label>
+              <input matInput type="number" min="1" step="1" placeholder="24"
+                     [ngModel]="tokenHours()" (ngModelChange)="tokenHours.set($event)" />
+              <mat-hint>How long it can still be redeemed. Empty is the control plane's default.</mat-hint>
+            </mat-form-field>
+          </div>
 
           @if (mintError()) {
             <p class="m-0 text-sm text-hostseal-bad">{{ mintError() }}</p>
           }
 
           <div class="flex flex-wrap gap-2">
-            <button mat-flat-button type="button" [disabled]="busy()" (click)="mint()">
-              {{ minted() ? 'Generate another token' : 'Generate token' }}
-            </button>
+            <div class="hostseal-split">
+              <button mat-flat-button type="button" [disabled]="busy()" (click)="mint()">
+                {{ minted() ? 'Generate another token' : 'Generate token' }}
+              </button>
+              @if (platform() !== 'windows' && bootstraps().length > 0) {
+                <button mat-flat-button type="button" class="hostseal-split__more"
+                        [disabled]="busy()" [matMenuTriggerFor]="bootstrapMenu"
+                        aria-label="Generate a token for a provisioning template"
+                        matTooltip="Generate a token for a signed template">
+                  <mat-icon aria-hidden="true">arrow_drop_down</mat-icon>
+                </button>
+                <mat-menu #bootstrapMenu="matMenu">
+                  @for (template of bootstraps(); track template.name) {
+                    <button mat-menu-item type="button" (click)="mint(template.name)">
+                      Generate token for {{ template.name }}
+                    </button>
+                  }
+                </mat-menu>
+              }
+            </div>
             <button mat-stroked-button type="button" [disabled]="!minted()"
                     matTooltip="Generate a token first; the command carries it."
                     (click)="copy('enrol', enrolCommand())">
@@ -149,6 +216,68 @@
           </div>
         </li>
       </ol>
+
+      <section class="mt-8 flex flex-col gap-2">
+        <h3 class="m-0 text-base font-medium">Tokens</h3>
+        <p class="m-0 text-sm opacity-80">
+          Every token minted in this fleet, without the values: only a hash is stored, so a token that
+          was not copied when it was shown is gone. An open token is a standing invitation into the
+          fleet until it is spent or expires, which is the reason to look here.
+        </p>
+
+        @if (tokensError()) {
+          <p class="m-0 text-sm text-hostseal-bad">{{ tokensError() }}</p>
+        } @else if (tokens() === null) {
+          <mat-progress-bar mode="indeterminate" aria-label="Loading the tokens" />
+        } @else if (tokens()!.length === 0) {
+          <p class="m-0 text-sm opacity-70">No token has been minted in this fleet yet.</p>
+        } @else {
+          <table mat-table [dataSource]="tokens()!" class="w-full hostseal-tokens">
+            <ng-container matColumnDef="label">
+              <th mat-header-cell *matHeaderCellDef>Label</th>
+              <td mat-cell *matCellDef="let token">{{ token.label || '—' }}</td>
+            </ng-container>
+
+            <ng-container matColumnDef="group">
+              <th mat-header-cell *matHeaderCellDef>Group</th>
+              <td mat-cell *matCellDef="let token">{{ token.group || '—' }}</td>
+            </ng-container>
+
+            <ng-container matColumnDef="bootstrap">
+              <th mat-header-cell *matHeaderCellDef>Template</th>
+              <td mat-cell *matCellDef="let token">
+                @if (token.bootstrap) {
+                  <code>{{ token.bootstrap }}</code>
+                } @else {
+                  —
+                }
+              </td>
+            </ng-container>
+
+            <ng-container matColumnDef="created">
+              <th mat-header-cell *matHeaderCellDef>Minted</th>
+              <td mat-cell *matCellDef="let token" class="hostseal-numeric">
+                {{ token.createdAt | date: 'short' }}
+              </td>
+            </ng-container>
+
+            <ng-container matColumnDef="state">
+              <th mat-header-cell *matHeaderCellDef>State</th>
+              <td mat-cell *matCellDef="let token">
+                <div [class]="token.usable ? 'font-medium' : 'opacity-70'">{{ tokenState(token) }}</div>
+                @if (!token.consumed) {
+                  <div class="text-xs opacity-70 hostseal-numeric">
+                    {{ token.usable ? 'expires' : 'expired' }} {{ token.expiresAt | date: 'short' }}
+                  </div>
+                }
+              </td>
+            </ng-container>
+
+            <tr mat-header-row *matHeaderRowDef="tokenColumns"></tr>
+            <tr mat-row *matRowDef="let row; columns: tokenColumns"></tr>
+          </table>
+        }
+      </section>
     }
     </div>
   </details>

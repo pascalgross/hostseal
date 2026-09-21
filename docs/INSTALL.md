@@ -301,8 +301,15 @@ values and the reasoning are in [`SECURITY.md` §3](SECURITY.md#3-the-intent-cat
 ## A host
 
 The interface has this as a panel: **Fleet → Add a host** mints the token, fills in this control plane's
-own address and gives you the three commands with a copy button on each. What follows is the same thing
-for a script, and the same thing to read when you want to know what those commands do.
+own address and gives you the three commands with a copy button on each. The label, the group and the
+lifetime are fields beside the button, each optional. The token button opens onto the signed templates,
+so **Generate token for …** mints one that names a bootstrap template, and the enrolment command then
+carries `--signers` and `--bootstrap` together — see
+[`SECURITY.md` §7](SECURITY.md#7-provisioning-and-the-enrolment-time-exception) for what the host does
+with them. Under the steps, the panel lists every token minted in the fleet — never the values, which
+are not stored — with whether each is open, was spent and by which host, or expired unused. What
+follows is the same thing for a script, and the same thing to read when you want to know what those
+commands do.
 
 ```bash
 # On the control plane, or through the web interface:
@@ -744,7 +751,9 @@ would be a flag that signs without asking, which is the signing oracle this whol
 refuse. On Linux `--install` refuses for the same reason: a systemd user unit has no terminal either.
 
 For an operator without a signer running, the Jobs page prints the `hostseal sign` command for what
-they filled in and takes the signed document back by paste. Same signature, two more steps.
+they filled in and takes the signed document back by paste, and a template's Signature card does the
+same with `hostseal sign-template`: it offers the version's body as a file, prints the command, and
+stores what the command printed as the next version. Same signature, two more steps.
 
 Nothing about the trust model changes: a host applies what a key signed only if that key's line is in
 its own `/etc/hostseal/trusted-signers`, which the control plane cannot write and this signer cannot
