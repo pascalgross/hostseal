@@ -289,6 +289,17 @@ func signerArgs(keyPath, addr string, idle time.Duration, origins []string) []st
 // session: an operator can set this up once, from the command they already know works, without the act
 // of registering it looking like the act of signing.
 func installAutostart(keyPath, addr string, idle time.Duration, origins []string) int {
+	// Before anything is written, because nothing else on this path would ever check them. The
+	// running signer validates its origins in localsign.New, at a moment --install never reaches —
+	// so an address pasted out of a browser's bar, with the path still on it, would register happily
+	// and then fail at every logon, after the PIN prompt, with the registration looking correct
+	// everywhere an operator would think to look.
+	checked, err := normalisedOrigins(origins)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "hostseal: %v\n", err)
+		return 2
+	}
+
 	exe, err := os.Executable()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "hostseal: this program cannot find its own path: %v\n", err)
@@ -304,7 +315,7 @@ func installAutostart(keyPath, addr string, idle time.Duration, origins []string
 		return 1
 	}
 
-	entry, err := autostart.Install(exe, signerArgs(keyPath, addr, idle, origins))
+	entry, err := autostart.Install(exe, signerArgs(keyPath, addr, idle, checked))
 	if errors.Is(err, autostart.ErrUnsupported) {
 		fmt.Fprint(os.Stderr, describeNoAutostart())
 		return 1
@@ -316,6 +327,28 @@ func installAutostart(keyPath, addr string, idle time.Duration, origins []string
 
 	fmt.Fprint(os.Stderr, describeAutostart(entry, previous, hadPrevious, exe, idle))
 	return 0
+}
+
+// normalisedOrigins checks the origins --install is about to register, and returns what a browser
+// sends.
+//
+// The normalised form rather than the typed one, because that is what the signer will compare against
+// and the registration should say what will happen rather than what was typed — an origin with a
+// trailing slash works either way, and one that reads differently in the registry from how it is
+// matched is a difference somebody has to know about in order to not be misled by it.
+//
+// It is the same localsign.ValidateOrigin the service runs, deliberately: two notions of a valid
+// origin would eventually disagree, and the one that disagreed silently would be this one.
+func normalisedOrigins(origins []string) ([]string, error) {
+	checked := make([]string, 0, len(origins))
+	for _, origin := range origins {
+		valid, err := localsign.ValidateOrigin(origin)
+		if err != nil {
+			return nil, err
+		}
+		checked = append(checked, valid)
+	}
+	return checked, nil
 }
 
 // uninstallAutostart removes the logon registration.

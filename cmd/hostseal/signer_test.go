@@ -226,3 +226,56 @@ func TestTheInstallNoticeWarnsAboutATemporaryDirectory(t *testing.T) {
 		t.Errorf("a permanent path was warned about:\n%s", elsewhere)
 	}
 }
+
+// TestInstallRefusesAnOriginTheRunningSignerWouldRefuse covers the check --install would otherwise
+// skip.
+//
+// The service validates its origins in localsign.New, which is a moment --install never reaches. An
+// address pasted out of a browser's bar still carries its path, and registering that produces a logon
+// entry that opens the token, asks for the PIN and then exits — every morning, with the registration
+// reading correctly in the registry and the command reading correctly on screen. The exit code is
+// checked rather than only the refusal, because 2 is the usage code every other pre-flight check here
+// returns and 1 is what an unregistrable platform returns: they say different things to a script.
+func TestInstallRefusesAnOriginTheRunningSignerWouldRefuse(t *testing.T) {
+	for name, origin := range map[string]string{
+		"a path":      "https://hostseal.example.org/jobs",
+		"a wildcard":  "*",
+		"plain http":  "http://hostseal.example.org",
+		"no host":     "https://",
+		"not a URL":   "hostseal.example.org",
+		"a query too": "https://hostseal.example.org/?tenant=ops",
+	} {
+		code := signerCommand([]string{"--install", "--key", "/nonexistent.key", "--origin", origin})
+		if code != 2 {
+			t.Errorf("--install with %s (%q) exited %d, want 2 — refused before anything is written",
+				name, origin, code)
+		}
+	}
+}
+
+// TestInstallRegistersTheOriginTheBrowserWillSend covers the normalising half of that check.
+//
+// What is registered should be what the signer will compare against, not what was typed. A trailing
+// slash and a default port are both things an operator copies out of an address bar and neither is
+// part of an Origin header, so a registration holding them would read as one thing in the registry and
+// match as another.
+func TestInstallRegistersTheOriginTheBrowserWillSend(t *testing.T) {
+	checked, err := normalisedOrigins([]string{
+		"https://hostseal.example.org/",
+		"https://staging.example.org:443",
+		"http://localhost:4200",
+	})
+	if err != nil {
+		t.Fatalf("normalising origins: %v", err)
+	}
+	want := []string{
+		"https://hostseal.example.org",
+		"https://staging.example.org",
+		"http://localhost:4200",
+	}
+	for i, origin := range want {
+		if checked[i] != origin {
+			t.Errorf("origin %d normalised to %q, want %q", i, checked[i], origin)
+		}
+	}
+}
