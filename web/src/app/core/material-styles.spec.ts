@@ -11,9 +11,10 @@ import { MatCardModule } from '@angular/material/card';
 /**
  * A host for the Material components whose appearance depends on a global stylesheet.
  *
- * Both specs below read a computed style rather than a class list, because in both cases the markup
- * was correct all along and no rule matched it. An assertion about the DOM would have passed while
- * the application rendered the word "notifications" across its own toolbar.
+ * Every spec below reads what the browser computed or rendered rather than a class list, because in
+ * each case the markup was correct all along and either no rule matched it or a rule from elsewhere
+ * did. An assertion about the DOM would have passed while the application rendered the word
+ * "notifications" across its own toolbar, and while its icons rendered as cropped fragments.
  */
 @Component({
   selector: 'hostseal-material-styles-probe',
@@ -33,6 +34,16 @@ import { MatCardModule } from '@angular/material/card';
       <mat-card-content class="flex flex-col gap-4">
         <span>first</span>
         <span>second</span>
+      </mat-card-content>
+    </mat-card>
+    <mat-card>
+      <mat-card-content class="flex items-start gap-3" style="width: 18rem">
+        <mat-icon id="row-icon">check_circle_outline</mat-icon>
+        <p>
+          An icon beside a sentence, which is how every callout in this application is built. The
+          sentence is long enough that laying it out on one line would need several times the width
+          the row has, because that is what decides whether the icon keeps its box.
+        </p>
       </mat-card-content>
     </mat-card>
   `,
@@ -168,6 +179,29 @@ describe('the global stylesheet, where it meets Angular Material', () => {
     // wrongly: fields side by side, hints over the content beneath them. `@import "tailwindcss"
     // important` is what restores the division of labour, and this is what notices if it is removed.
     expect(getComputedStyle(content as Element).display).toBe('flex');
+  });
+
+  it('keeps an icon beside a sentence at its full width, rather than cropping the glyph', () => {
+    const icon = render().querySelector('#row-icon');
+    expect(icon).not.toBeNull();
+
+    // Material sets `overflow: hidden` on mat-icon to crop an oversized SVG, and a flex item whose
+    // overflow is not `visible` has no automatic minimum size — so the 24px width is a starting point
+    // the flex algorithm may shrink rather than a floor. Beside a paragraph, whose max-content width
+    // is the whole sentence on one line, there is always more to shrink away than the row can hold:
+    // the Services all-clear tick came out 10.6px wide and cropped to a bare arc.
+    //
+    // The rendered box is measured rather than the declaration, because the declaration was right all
+    // along. `width: 24px` computes to 24px and the element is 10.6px on screen, so an assertion about
+    // the computed width would have passed while the icons rendered as fragments — which is the same
+    // trap the two specs at the top of this file were written for.
+    const box = (icon as Element).getBoundingClientRect();
+    expect(box.width)
+      .withContext(
+        'the icon shrank below its own box and `overflow: hidden` cropped the glyph. See the ' +
+          'mat-icon rule in src/styles.scss.',
+      )
+      .toBeCloseTo(24, 0);
   });
 
   it('gives a wrapped hint room, so it does not write over the next field', () => {

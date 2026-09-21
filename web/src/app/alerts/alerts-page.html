@@ -27,10 +27,10 @@
   </header>
 
   @if (!mailConfigured()) {
-    <mat-card class="mb-6 max-w-3xl">
+    <mat-card class="mb-6">
       <mat-card-content class="!pt-6 flex items-start gap-3">
         <mat-icon class="text-hostseal-warn">mark_email_unread</mat-icon>
-        <p class="m-0 text-sm">
+        <p class="m-0 text-sm max-w-3xl">
           This control plane has no mail relay, so recipients on a rule are recorded and never
           delivered — every other route still works. Start <code>hostseal-server</code> with
           <code>--smtp-host</code> and <code>--smtp-from</code> to enable mail.
@@ -39,12 +39,19 @@
     </mat-card>
   }
 
-  <mat-card class="mb-8 max-w-3xl">
+  <mat-card class="mb-8">
     <mat-card-header>
       <mat-card-title>New rule</mat-card-title>
     </mat-card-header>
 
-    <mat-card-content class="!pt-4 flex flex-col gap-4">
+    <!--
+      The card is the page's width and the form is not. A rule is filled in down a single column, and
+      a cooldown of fifteen minutes typed into a box the width of the window is harder to read rather
+      than easier — so the width this card gained goes to agreeing with the rules listed below it, not
+      to the inputs. The actions carry the same measure, because a button at the card's edge and
+      fields ending well short of it is the misalignment this was fixing, one level down.
+    -->
+    <mat-card-content class="!pt-4 flex flex-col gap-4 max-w-2xl">
       <mat-form-field appearance="outline">
         <mat-label>Condition</mat-label>
         <mat-select [ngModel]="newCondition()" (ngModelChange)="newCondition.set($event)">
@@ -87,14 +94,14 @@
       }
     </mat-card-content>
 
-    <mat-card-actions align="end">
+    <mat-card-actions align="end" class="max-w-2xl">
       <button mat-flat-button [disabled]="!canCreate()" (click)="create()">Create rule</button>
     </mat-card-actions>
   </mat-card>
 
   @if (list.length === 0) {
-    <mat-card class="max-w-3xl">
-      <mat-card-content class="!pt-6 text-sm opacity-80">
+    <mat-card>
+      <mat-card-content class="!pt-6 text-sm opacity-80 max-w-3xl">
         <p class="m-0">
           No rules yet. Nothing is lost in the meantime: every event is in the inbox whether or not a
           rule matched it.

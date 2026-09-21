@@ -44,10 +44,10 @@
   </header>
 
   @if (list.length === 0) {
-    <mat-card class="max-w-2xl">
+    <mat-card>
       <mat-card-content class="!pt-6 text-sm opacity-80 flex items-start gap-3">
         <mat-icon class="text-hostseal-ok">check_circle_outline</mat-icon>
-        <div>
+        <div class="max-w-3xl">
           <p class="m-0">No host reports a failed unit.</p>
           <p class="m-0 mt-2">
             This is what each host last reported on its heartbeat, so the resolution is the heartbeat

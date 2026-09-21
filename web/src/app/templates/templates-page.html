@@ -212,7 +212,7 @@
               <mat-icon class="text-hostseal-warn">warning_amber</mat-icon>
               <div class="text-sm">
                 <p class="m-0 font-medium">This body looks like it carries secrets.</p>
-                <ul class="m-0 mt-2 pl-5">
+                <ul class="m-0 mt-2 pl-5 list-disc">
                   @for (warning of record.warnings; track warning) {
                     <li>{{ warning }}</li>
                   }
@@ -346,7 +346,7 @@
               }
 
               @if (result.warnings.length > 0) {
-                <ul class="m-0 pl-5 text-sm text-hostseal-warn">
+                <ul class="m-0 pl-5 list-disc text-sm text-hostseal-warn">
                   @for (warning of result.warnings; track warning) {
                     <li>{{ warning }}</li>
                   }

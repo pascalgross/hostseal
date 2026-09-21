@@ -8,21 +8,21 @@
 </header>
 
 @if (error()) {
-  <mat-card class="max-w-xl mb-6">
+  <mat-card class="mb-6">
     <mat-card-content class="!pt-6 flex items-start gap-3">
       <mat-icon class="text-hostseal-bad">error_outline</mat-icon>
-      <p class="m-0">{{ error() }}</p>
+      <p class="m-0 max-w-3xl">{{ error() }}</p>
     </mat-card-content>
   </mat-card>
 }
 
-<mat-card class="mb-8 max-w-3xl">
+<mat-card class="mb-8">
   <mat-card-header>
     <mat-card-title>Ask a host for a report</mat-card-title>
   </mat-card-header>
 
   <mat-card-content class="!pt-4">
-    <p class="text-sm opacity-80 mt-0">
+    <p class="text-sm opacity-80 mt-0 max-w-3xl">
       Everything this control plane can authorise on its own: reports, and applying security updates,
       which it signs with its own key and which each host bounds by its own policy. Not the destructive
       tier — applying every update, starting, stopping or restarting a unit, rebooting. Those carry a
@@ -44,7 +44,7 @@
         </mat-select>
       </mat-form-field>
 
-      <mat-form-field appearance="outline" class="min-w-72">
+      <mat-form-field appearance="outline" class="grow min-w-72">
         <mat-label>Operation</mat-label>
         <mat-select [ngModel]="chosenIntent()" (ngModelChange)="chosenIntent.set($event)">
           @for (entry of startableIntents(); track entry.name) {
@@ -63,7 +63,7 @@
 </mat-card>
 
 @if (awaiting().length > 0 || awaitingError()) {
-  <mat-card class="mb-8 max-w-3xl !border-l-4 !border-l-hostseal-warn">
+  <mat-card class="mb-8 !border-l-4 !border-l-hostseal-warn">
     <mat-card-header>
       <mat-card-title>Waiting to be released</mat-card-title>
     </mat-card-header>
@@ -82,7 +82,7 @@
         </p>
       } @else {
         @if (awaitingTruncated()) {
-          <p class="m-0 mb-3 flex items-start gap-2 text-sm">
+          <p class="m-0 mb-3 flex items-start gap-2 text-sm max-w-3xl">
             <mat-icon class="text-hostseal-warn">warning_amber</mat-icon>
             <span>
               This card holds as many waiting jobs as one request can carry, so there may be more —
@@ -92,7 +92,7 @@
             </span>
           </p>
         }
-        <p class="text-sm opacity-80 mt-0">
+        <p class="text-sm opacity-80 mt-0 max-w-3xl">
           Listed here as well as below, because the list below is bounded and a job that has been waiting
           a while drops off the end of it. Releasing is a decision, not a formality: you are agreeing that
           this operation should happen on this host now.

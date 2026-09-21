@@ -1,4 +1,4 @@
-<mat-card class="max-w-3xl">
+<mat-card>
   <details class="group" (toggle)="load()">
     <summary class="flex items-center gap-3 p-4 cursor-pointer list-none">
       <mat-icon class="transition-transform group-open:rotate-90" aria-hidden="true">chevron_right</mat-icon>
@@ -38,7 +38,7 @@
       </div>
 
       @if (instructions()!.agentUrlIsAGuess) {
-        <div class="mb-4 p-3 rounded bg-hostseal-warn/15 flex items-start gap-3 text-sm">
+        <div class="mb-4 p-3 rounded bg-hostseal-warn/15 flex items-start gap-3 text-sm max-w-3xl">
           <mat-icon class="text-hostseal-warn" aria-hidden="true">info_outline</mat-icon>
           <p class="m-0">
             Nobody has told this control plane which address agents reach it at, so the commands below
