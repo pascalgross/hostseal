@@ -1,5 +1,5 @@
-import { Component, computed, inject, signal } from '@angular/core';
-import { toSignal } from '@angular/core/rxjs-interop';
+import { Component, DestroyRef, computed, inject, signal } from '@angular/core';
+import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { MatButtonModule } from '@angular/material/button';
 import { MatCardModule } from '@angular/material/card';
 import { MatChipsModule } from '@angular/material/chips';
@@ -8,9 +8,8 @@ import { MatProgressBarModule } from '@angular/material/progress-bar';
 import { MatTableModule } from '@angular/material/table';
 import { MatTooltipModule } from '@angular/material/tooltip';
 import { RouterLink } from '@angular/router';
-import { catchError, of, startWith } from 'rxjs';
 
-import { Host } from '../core/api.models';
+import { FleetResponse, Host } from '../core/api.models';
 import { EnrolPanel } from './enrol-panel';
 import { ApiService } from '../core/api.service';
 import { describeError } from '../core/errors';
@@ -18,6 +17,33 @@ import { formatAge, formatDuration, formatOffset } from '../core/format';
 
 /** What the fleet request can be doing, so the template can render each state distinctly. */
 type LoadState = 'loading' | 'loaded' | 'failed';
+
+/**
+ * How often the list is re-read before the control plane has said how often hosts report.
+ *
+ * Only the first interval, since every answer carries the heartbeat pacing and the cadence follows it
+ * from then on. Half a minute is short enough that a host enrolled while the page is open appears
+ * before anybody reaches for the reload key, and long enough that a tab left open on a small fleet is
+ * not a noticeable share of the control plane's requests.
+ */
+const DEFAULT_REFRESH_SECONDS = 30;
+
+/**
+ * The shortest interval the list will re-read at, whatever the fleet's heartbeat.
+ *
+ * A fleet paced at five seconds does not need a list that polls at five seconds: nobody reads a table
+ * that fast, and every open tab would be a client the control plane serves as often as its hosts.
+ */
+const MINIMUM_REFRESH_SECONDS = 15;
+
+/**
+ * The longest interval the list will re-read at, whatever the fleet's heartbeat.
+ *
+ * The heartbeat bounds how fast a *host's* row can change, and nothing else: an enrolment, a
+ * revocation or a job result changes the list whenever it happens. A fleet paced at ten minutes would
+ * otherwise show a host enrolled a moment ago ten minutes from now.
+ */
+const MAXIMUM_REFRESH_SECONDS = 60;
 
 /**
  * The fleet list: every enrolled host and the four things an operator checks first.
@@ -51,6 +77,12 @@ export class FleetList {
   /** Talks to the control plane. */
   private readonly api = inject(ApiService);
 
+  /** Stops the refresh and the visibility listener when the page is left. */
+  private readonly destroyRef = inject(DestroyRef);
+
+  /** The pending re-read, null when none is booked. */
+  private timer: ReturnType<typeof setTimeout> | null = null;
+
   /** The columns rendered, in order. */
   protected readonly columns = [
     'hostname',
@@ -62,34 +94,157 @@ export class FleetList {
     'lastSeen',
   ];
 
-  /** The last error message, empty when the fleet loaded. */
+  /** Why the first load failed, empty when it did not. Only the first: see `refreshError`. */
   protected readonly error = signal('');
 
   /**
-   * The fleet, or null while it is loading.
+   * Why the most recent re-read failed, empty when it succeeded.
    *
-   * The request is converted to a signal rather than subscribed to in a lifecycle hook, so the template
-   * can render the loading, loaded and failed states without the component holding a subscription it
-   * would then have to remember to release.
+   * Kept apart from `error` because the two failures mean different things on screen. A first load
+   * that fails leaves nothing to show, so the page says so in place of the list. A re-read that fails
+   * leaves the last good list, which is still the best answer available — replacing a table of hosts
+   * with an error card every time a proxy hiccups would make the page unusable exactly when somebody
+   * is watching it. So the list stays, dated, with the failure said beside it.
    */
-  protected readonly fleet = toSignal(
-    this.api.fleet().pipe(
-      startWith(null),
-      catchError((err: unknown) => {
-        this.error.set(describeError(err));
-        return of(null);
-      }),
-    ),
-    { initialValue: null },
-  );
+  protected readonly refreshError = signal('');
+
+  /**
+   * The fleet, or null until the first answer.
+   *
+   * A signal written by the read loop rather than a conversion of one request, because the request is
+   * repeated: the list re-reads itself for as long as the page is open, at the pace the control plane
+   * says hosts report, so that a host enrolled, a job finished or a reboot completed shows up without
+   * anybody pressing reload. Before this, the fleet page was a snapshot of whenever it was opened,
+   * which on a page people leave open is a snapshot of the wrong moment.
+   */
+  protected readonly fleet = signal<FleetResponse | null>(null);
+
+  /** When the list was last read successfully, by the browser's clock, zero for never. */
+  protected readonly refreshedAt = signal(0);
+
+  /** Whether a re-read is in flight, so the header can say so without the table going anywhere. */
+  protected readonly refreshing = signal(false);
 
   /** Which of the three states the page is in. */
   protected readonly state = computed<LoadState>(() => {
-    if (this.error()) {
-      return 'failed';
+    if (this.fleet() !== null) {
+      return 'loaded';
     }
-    return this.fleet() === null ? 'loading' : 'loaded';
+    return this.error() ? 'failed' : 'loading';
   });
+
+  /** The time of the last successful read, for the header. */
+  protected readonly refreshedClock = computed(() => {
+    const at = this.refreshedAt();
+    return at === 0 ? '' : new Date(at).toLocaleTimeString();
+  });
+
+  /**
+   * How long to wait before the next read, in seconds.
+   *
+   * Paced by the fleet's heartbeat because that is how fast a row can change on its own, bounded on
+   * both sides for the reasons the two bounds give. Computed from the last answer rather than fixed,
+   * so a fleet whose pacing is changed on the control plane changes the page's without a release.
+   */
+  protected readonly refreshSeconds = computed(() => {
+    const heartbeat = this.fleet()?.heartbeatSeconds;
+    if (!heartbeat || heartbeat <= 0) {
+      return DEFAULT_REFRESH_SECONDS;
+    }
+    return Math.min(MAXIMUM_REFRESH_SECONDS, Math.max(MINIMUM_REFRESH_SECONDS, heartbeat));
+  });
+
+  /**
+   * Starts the read loop, and ties it to whether the page can be seen.
+   *
+   * A tab in the background is re-read by nobody, so the loop stops while the document is hidden and
+   * reads at once when it is shown again — which is also the moment somebody switching back to the
+   * tab most wants a current list rather than one from before they left. The listener is removed
+   * with the component, for the same reason the timer is: a page that was left must cost the
+   * control plane nothing.
+   */
+  constructor() {
+    this.read();
+    const onVisibility = (): void => {
+      if (this.pageHidden()) {
+        this.stop();
+      } else {
+        this.read();
+      }
+    };
+    document.addEventListener('visibilitychange', onVisibility);
+    this.destroyRef.onDestroy(() => {
+      document.removeEventListener('visibilitychange', onVisibility);
+      this.stop();
+    });
+  }
+
+  /**
+   * Whether the document is hidden, read through a method so a spec can say it is.
+   *
+   * `document.hidden` is a browser global the loop has to consult, and a spec that could not set it
+   * could not prove the loop stops for a hidden tab — which is the half of the behaviour that costs
+   * the control plane something if it is wrong.
+   */
+  protected pageHidden(): boolean {
+    return document.hidden;
+  }
+
+  /**
+   * Reads the fleet once, now, and books the next read afterwards.
+   *
+   * Also the manual refresh: an operator who has just run a command on a host does not want to wait
+   * out the interval to see the result. Any pending read is cancelled first so a manual read and a
+   * scheduled one cannot leave two loops running.
+   *
+   * The request is cancelled with the component rather than merely ignored, because a read still in
+   * flight when the page is left would otherwise land on a dead component and book the next one —
+   * a timer nothing can reach, reading the fleet for the life of the tab.
+   */
+  protected read(): void {
+    this.stop();
+    this.refreshing.set(true);
+    this.api
+      .fleet()
+      .pipe(takeUntilDestroyed(this.destroyRef))
+      .subscribe({
+        next: (fleet) => {
+          this.fleet.set(fleet);
+          this.error.set('');
+          this.refreshError.set('');
+          this.refreshedAt.set(Date.now());
+          this.refreshing.set(false);
+          this.schedule();
+        },
+        error: (err: unknown) => {
+          const message = describeError(err);
+          if (this.fleet() === null) {
+            this.error.set(message);
+          } else {
+            this.refreshError.set(message);
+          }
+          this.refreshing.set(false);
+          this.schedule();
+        },
+      });
+  }
+
+  /** Books the next read, unless the page cannot be seen. */
+  private schedule(): void {
+    this.stop();
+    if (this.pageHidden()) {
+      return;
+    }
+    this.timer = setTimeout(() => this.read(), this.refreshSeconds() * 1000);
+  }
+
+  /** Cancels the pending read, which is how "stop refreshing" is actually spelled. */
+  private stop(): void {
+    if (this.timer !== null) {
+      clearTimeout(this.timer);
+      this.timer = null;
+    }
+  }
 
   /** The hosts, or an empty list while loading. */
   protected readonly hosts = computed<Host[]>(() => this.fleet()?.hosts ?? []);
