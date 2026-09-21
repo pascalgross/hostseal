@@ -131,3 +131,42 @@ func TestTheEnrolmentInstructionsNeedAnOperatorAndNameTheAgentAddress(t *testing
 			"prints, so an operator cannot compare it without transforming it first", view.CAFingerprint)
 	}
 }
+
+// TestTheInstructionsSayWhereEachPlatformGetsTheAgentFrom is the omission this file did not catch.
+//
+// Debian and Ubuntu hosts have a repository, and the instructions have always named it. Windows hosts
+// have none — the agent for them is one archive attached to a release — and for several releases the
+// archive was built, checksummed into SHA256SUMS, and then attached to nothing, while the panel went on
+// printing apt-get to whoever was holding a Windows Server. Every route to that agent was a Linux one.
+//
+// Both fields are asserted together because that is the property: an operator on either platform is
+// told where their agent comes from. One of them being present is how this went unnoticed.
+func TestTheInstructionsSayWhereEachPlatformGetsTheAgentFrom(t *testing.T) {
+	h := newHarness(t)
+
+	status, body := h.adminJSON(t, h.adminToken, http.MethodGet, "/api/v1/enrolment", nil)
+	if status != http.StatusOK {
+		t.Fatalf("reading the instructions returned %d: %s", status, body)
+	}
+	var view struct {
+		// APTURL is where a Debian or Ubuntu host installs the agent from.
+		APTURL string `json:"aptUrl"`
+
+		// WindowsArchiveURL is where a Windows host downloads it from.
+		WindowsArchiveURL string `json:"windowsArchiveUrl"`
+	}
+	if err := json.Unmarshal(body, &view); err != nil {
+		t.Fatalf("decoding the instructions: %v", err)
+	}
+
+	if view.APTURL == "" {
+		t.Error("the instructions name no APT repository, so a Debian host is told nothing to install from")
+	}
+	// The archive's own name rather than the whole URL: what matters is that the link points at the
+	// release asset an operator has to unpack, and a test pinned to the host would fail on a mirror
+	// instead of on the thing it is about.
+	if !strings.HasSuffix(view.WindowsArchiveURL, "hostseal-agent-windows-amd64.zip") {
+		t.Errorf("the instructions point a Windows host at %q, which is not the release archive",
+			view.WindowsArchiveURL)
+	}
+}

@@ -35,3 +35,14 @@ const DefaultServerCABundle = `C:\Program Files\HostSeal\server-ca.crt`
 // image. A fleet built by copying one prepared virtual machine without running Sysprep has many hosts
 // claiming one identity.
 const MachineIDPath = ""
+
+// RestartCommand is what an operator runs to make a freshly enrolled host act on its enrolment.
+//
+// The Windows counterpart of the Linux constant, and needed for the same reason: Install-HostSealAgent
+// starts the service before there is any enrolment to find, so the agent is already in the idle loop —
+// which re-reads the policy on every tick and never re-reads the enrolment state. Without this the host
+// looks installed, looks running, and reports nothing.
+//
+// Restart-Service rather than sc.exe, because the installer is PowerShell and this is the line that
+// follows it in the same elevated session.
+const RestartCommand = "Restart-Service hostseal-agent"

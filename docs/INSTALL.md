@@ -420,6 +420,156 @@ The `.sources` file uses deb822 with `Signed-By:` naming an explicit keyring, so
 trusted for the HostSeal repository only. `apt-key` is never used: it installs a key that is trusted for
 every repository on the system, which turns one compromised project into root on the machine.
 
+### Windows Server
+
+A Windows host is read-only — inventory, services, pending updates and reboot state — and that is the
+design rather than a first version. [`SECURITY.md` §12](SECURITY.md#12-windows-hosts) works out why, and
+what it would take for that to change. Everything else is the enrolment above: the same token, the same
+certificate, the same single outbound connection, the same guarantee.
+
+What is different is how the software arrives. There is no repository to subscribe to. The agent is one
+archive — `hostseal-agent-windows-amd64.zip`, attached to every [release][releases] — and an upgrade is
+the same download through the same installer. Nothing on a Windows host fetches the next version by
+itself, so this is a step somebody comes back for.
+
+The archive holds `hostseal-agent.exe`, `hostseal-update-scan.exe`, `hostseal.exe`, the default
+`policy.toml` and `Install-HostSealAgent.ps1`. The installer is the only PowerShell in HostSeal and runs
+once, from an administrator's own session, before there is an agent to constrain — the agent itself
+invokes no interpreter, and `powershell.exe` is in the deny-lists `internal/run` and `internal/intent`
+both check. Everything below runs in an **elevated** session.
+
+```powershell
+# 1. Fetch the archive and run the installer.
+& {
+  $ErrorActionPreference = 'Stop'
+  $zip = Join-Path $env:TEMP 'hostseal-agent-windows-amd64.zip'
+  $dir = Join-Path $env:TEMP 'hostseal-agent'
+  Remove-Item -Path $zip, $dir -Recurse -Force -ErrorAction SilentlyContinue
+  curl.exe -fsSL https://github.com/pascalgross/hostseal/releases/latest/download/hostseal-agent-windows-amd64.zip -o $zip
+  if ($LASTEXITCODE -ne 0) { throw 'the download failed; nothing has been installed' }
+  Expand-Archive -Path $zip -DestinationPath $dir
+  Get-ChildItem -Path $dir -Recurse | Unblock-File
+  & (Join-Path $dir 'Install-HostSealAgent.ps1')
+}
+
+# 2. Trust this control plane's authority, before enrolling rather than after — the same ordering,
+#    and the same failure when it is done the other way round.
+& {
+  $ErrorActionPreference = 'Stop'
+  $tmp = Join-Path $env:TEMP 'hostseal-ca.crt'
+  curl.exe -fsSL https://hostseal.example.org/api/v1/ca.crt -o $tmp
+  if ($LASTEXITCODE -ne 0) { throw 'the certificate could not be fetched; nothing was installed' }
+  Copy-Item -Path $tmp -Destination 'C:\Program Files\HostSeal\server-ca.crt' -Force
+}
+
+# 3. Enrol, and restart so the running service reads it.
+& 'C:\Program Files\HostSeal\hostseal.exe' enroll --server https://hostseal.example.org --token hsl_…
+Restart-Service hostseal-agent
+```
+
+Each step is one `& { … }` block because that is what makes a failure stop it. Pasted as loose lines,
+every line is its own statement: a download that fails leaves the next command running, and the staging
+paths are fixed, so the run before this one may have left an archive and an unpacked tree in `%TEMP%`.
+The installer would then start from stale files, stop the service, copy older binaries over newer ones
+and report a successful upgrade. Inside a block, `throw` abandons the rest, and
+`$ErrorActionPreference` set there belongs to that block's scope, so a failing cmdlet is terminating
+without the session being left altered afterwards. `$LASTEXITCODE` is checked by hand because no
+preference variable covers a native program, and `-f` makes curl *return* failure rather than raise it.
+
+Step 2 fetches to a temporary file and copies it in, rather than writing straight to the trust anchor's
+path, for the same reason: curl truncates its output file before it knows the response status — and
+`--remove-on-error`, which would clean that up, is newer than the curl on Server 2019 — so the direct
+form can leave an empty `server-ca.crt` behind on a 404. `hostseal enroll` reads that path when it
+exists, so enrolment would then fail to verify a control plane that was never the problem.
+
+Step 3 needs no such block. A failed enrolment is loud, and restarting an agent that is still unenrolled
+changes nothing: it idles again, exactly as it was.
+
+`curl.exe` with the extension, and that is not pedantry: in Windows PowerShell 5.1 — what ships with
+every supported Windows Server — `curl` is an alias for `Invoke-WebRequest`, whose parameters these
+arguments do not fit (`-o` is ambiguous between `-OutFile` and two common parameters), and which fails
+on a host with Internet Explorer Enhanced Security for want of `-UseBasicParsing`. The real curl has
+been in `System32` since Server 2019, which is this project's floor.
+
+`Unblock-File` because every file unpacked from a downloaded archive carries the internet zone, and the
+default execution policy on Windows Server refuses an unsigned script bearing it. The error names the
+execution policy rather than the zone, which sends people to `Set-ExecutionPolicy Bypass` and leaves the
+machine weaker than it was found. Clearing the zone on the files you just downloaded is the smaller act.
+Run the installer from where the archive was unpacked, too: it installs `policy.toml` from beside
+itself.
+
+There is no `chown` or `chmod` in step 2 and nothing is missing. The installer replaces the ACL on
+`C:\Program Files\HostSeal` with an explicit one that inherits, granting the agent's service account
+read and execute and nothing else, so a file created there is already right. That is also why the last
+line is `Copy-Item` and not `Move-Item`: a copy creates a new file, which inherits that ACL, while a
+move within a volume keeps the permissions the file had in `%TEMP%`, where the agent's account is not
+named at all — leaving it unable to read the authority it verifies the control plane against.
+
+The restart in step 3 is not optional, and it is not optional on Debian either. The installer starts the
+service, so by the time you enrol there is already an agent running — one that found no credential, said
+so, and settled into reporting local state on a timer. That loop re-reads the local policy on every tick
+and never re-reads the enrolment state. Skip the restart and you have an active service, a host the
+control plane heard from exactly once, and no facts arriving.
+
+**Fleet → Add a host** prints all three with this control plane's own address and a fresh token filled
+in; the switch above the commands is what chooses between these and the Debian ones.
+
+#### When the control plane serves its own certificate
+
+Step 2 fetches over a connection `curl.exe` verifies like any other client, so it works from a hostname
+the host already trusts and not from one whose certificate is the thing being fetched — the same
+[bootstrap problem](#where-to-fetch-it-from) as on Debian, with the same three ways round it. Written
+out, the unverified fetch with the fingerprint check that makes it safe:
+
+```powershell
+& {
+  $ErrorActionPreference = 'Stop'
+  $tmp = Join-Path $env:TEMP 'hostseal-ca.crt'
+  curl.exe -fsSLk https://agents.hostseal.example.org/api/v1/ca.crt -o $tmp
+  if ($LASTEXITCODE -ne 0) { throw 'the certificate could not be fetched; nothing was installed' }
+  $cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2 $tmp
+  $sha = [System.Security.Cryptography.SHA256]::Create().ComputeHash($cert.RawData)
+  $got = ($sha | ForEach-Object { $_.ToString('X2') }) -join ':'
+  if ($got -ne '<the digest the panel shows>') {
+    throw 'FINGERPRINT MISMATCH - do not install this certificate'
+  }
+  Copy-Item -Path $tmp -Destination 'C:\Program Files\HostSeal\server-ca.crt' -Force
+}
+```
+
+The fetch is checked before anything is compared, and that ordering is the point rather than tidiness.
+Without it a failed download leaves `$cert` unset, the digest empty and the comparison false — so the
+step reports a fingerprint mismatch, naming an attack that did not happen, for a control plane that was
+merely unreachable. It is the same failure the shell version's `if`/`else` is written to avoid, and the
+mismatch is a guard clause rather than the `else` of the copy so that a copy which fails keeps its own
+error too.
+
+The digest is computed over the certificate's `RawData` rather than with `Get-FileHash`, because the
+value the panel shows is openssl's — a SHA-256 over the DER — and hashing the PEM file's bytes produces
+a different number that matches nothing. A check that fails every honest fetch is a check people stop
+performing, which is worse than not writing one. `SHA256::Create` rather than `GetCertHash('SHA256')`,
+whose overload arrived in .NET Framework 4.8 and is absent on a Server 2019 host nobody has updated.
+
+#### What the installer did, and undoing it
+
+The service runs as `NT SERVICE\hostseal-agent` with an empty required-privileges list — the SCM strips
+every privilege not named, and `SeShutdownPrivilege` is therefore absent, so the agent could not restart
+its host if its code tried to. It is a member of `BUILTIN\Users`, which is the weakest membership
+`IUpdateSearcher` will answer to; without it the update scan fails with `E_ACCESSDENIED` and the host
+reports its updates as unmeasurable for ever. `trusted-signers` is created empty and never overwritten,
+on a fresh install and on an upgrade alike.
+
+```powershell
+# From the unpacked archive: the installer is not one of the files it copies into Program Files.
+& (Join-Path $env:TEMP 'hostseal-agent\Install-HostSealAgent.ps1') -Uninstall
+```
+
+removes the service and the three binaries, and deliberately leaves the state directory, the policy file
+and the trust anchor behind. Deleting `trusted-signers` would silently re-open every destructive operation
+an administrator had closed, with no symptom until a signature that should verify does not.
+
+[releases]: https://github.com/pascalgross/hostseal/releases
+
 ## Asking a host to do something
 
 ```bash
