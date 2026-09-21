@@ -243,13 +243,18 @@ export class JobsList {
   /**
    * Describes how a job was authorised, in the words that matter.
    *
-   * "mTLS only" is not a euphemism for unauthorised: a read intent changes nothing and reads nothing an
-   * unprivileged local user could not, so the certificate is the whole of what it needs. Saying so
-   * beside a signed job is what makes the difference between the tiers visible.
+   * "The client certificate alone" is not a euphemism for unauthorised: a read intent changes nothing
+   * and reads nothing an unprivileged local user could not, so the certificate is the whole of what it
+   * needs. Saying so beside a signed job is what makes the difference between the tiers visible.
+   *
+   * It is the catalogue's sentence word for word, because this column and the catalogue's carry the
+   * same heading and answer the same question. This used to read "mTLS only", which is the same fact
+   * in the transport's vocabulary rather than the reader's — and two spellings under one heading are
+   * read as two different things by the person the wording is for.
    */
   protected authorisation(job: Job): string {
     if (!job.signed) {
-      return 'mTLS only';
+      return 'the client certificate alone';
     }
     return `signed by ${job.signerKeyId ?? 'an unnamed key'}`;
   }
