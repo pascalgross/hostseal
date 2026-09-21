@@ -8,9 +8,30 @@ import (
 
 	"github.com/pascalgross/hostseal/internal/canonical"
 	"github.com/pascalgross/hostseal/internal/intent"
+	"github.com/pascalgross/hostseal/internal/protocol"
 	"github.com/pascalgross/hostseal/internal/signing"
 	"github.com/pascalgross/hostseal/internal/signing/backend/file"
+	"github.com/pascalgross/hostseal/internal/signjob"
 )
+
+// draftJob assembles a signable job the way `hostseal sign` does.
+//
+// A wrapper around signjob.Draft with the flags' own argument order, so that the specifications below
+// read as the command reads: --id, --host, --intent, --params, --not-before, --valid-for. The rules
+// themselves moved to internal/signjob when the loopback signer began drafting jobs too — one copy of
+// how a nonce and a window are chosen, two places that sign — and these tests stayed here because what
+// they hold is a property of this command: that what an operator is shown is what gets signed.
+func draftJob(jobID, host, name, rawParams, notBefore string, validFor time.Duration) (
+	protocol.Job, intent.Spec, intent.Params, error) {
+	return signjob.Draft(signjob.Request{
+		JobID:     jobID,
+		HostID:    host,
+		Intent:    name,
+		RawParams: []byte(rawParams),
+		NotBefore: notBefore,
+		ValidFor:  validFor,
+	})
+}
 
 // TestGuaranteeWhatIsShownIsWhatIsSigned is the property this command exists for.
 //
@@ -20,7 +41,7 @@ import (
 // printed as "signed payload, verbatim" are the bytes the signature covers, and the human-readable
 // summary is decoded from the same job.
 func TestGuaranteeWhatIsShownIsWhatIsSigned(t *testing.T) {
-	job, spec, decoded, err := buildSignableJob(
+	job, spec, decoded, err := draftJob(
 		"", "01JTESTHOST", "service.restart", `{"unit":"nginx.service"}`, "", time.Hour)
 	if err != nil {
 		t.Fatalf("building a signable job: %v", err)
@@ -79,7 +100,7 @@ func TestGuaranteeASignedJobVerifiesAgainstTheHostsOwnAnchor(t *testing.T) {
 	}
 
 	const host = "01JTESTHOST"
-	job, _, _, err := buildSignableJob("", host, "host.reboot", `{"delaySeconds":60}`, "", time.Hour)
+	job, _, _, err := draftJob("", host, "host.reboot", `{"delaySeconds":60}`, "", time.Hour)
 	if err != nil {
 		t.Fatalf("building a signable job: %v", err)
 	}
@@ -119,7 +140,7 @@ func TestGuaranteeASignedJobVerifiesAgainstTheHostsOwnAnchor(t *testing.T) {
 func TestSignRefusesAnIntentItCannotAuthorise(t *testing.T) {
 	for _, name := range []string{"facts.collect", "packages.applySecurity"} {
 		t.Run(name, func(t *testing.T) {
-			_, _, _, err := buildSignableJob("", "01JTESTHOST", name, `{}`, "", time.Hour)
+			_, _, _, err := draftJob("", "01JTESTHOST", name, `{}`, "", time.Hour)
 			if err == nil {
 				t.Fatalf("%s was accepted for offline signing", name)
 			}
@@ -138,7 +159,7 @@ func TestSignRefusesAnIntentItCannotAuthorise(t *testing.T) {
 // verifying, and the operator would be told their key was wrong.
 func TestSignRefusesAJobIdentifierAHostCannotReportAgainst(t *testing.T) {
 	for _, bad := range []string{"west/reboot", "reboot?now", "reboot-2026-08-23", strings.Repeat("A", 65)} {
-		_, _, _, err := buildSignableJob(bad, "01JTESTHOST", "host.reboot", `{}`, "", time.Hour)
+		_, _, _, err := draftJob(bad, "01JTESTHOST", "host.reboot", `{}`, "", time.Hour)
 		if err == nil {
 			t.Errorf("job id %q was accepted", bad)
 		}
@@ -153,7 +174,7 @@ func TestSignRefusesAJobIdentifierAHostCannotReportAgainst(t *testing.T) {
 // request would produce a 400 that reads as a malformed request rather than as a missing field.
 func TestSignedRequestCarriesEverythingTheSignatureCovers(t *testing.T) {
 	const host = "01JTESTHOST"
-	job, _, _, err := buildSignableJob("", host, "host.reboot", `{"delaySeconds":60}`, "", time.Hour)
+	job, _, _, err := draftJob("", host, "host.reboot", `{"delaySeconds":60}`, "", time.Hour)
 	if err != nil {
 		t.Fatalf("building: %v", err)
 	}
@@ -187,7 +208,7 @@ func TestSignedRequestCarriesEverythingTheSignatureCovers(t *testing.T) {
 // edges are computed from different instants, and this is the test that says so.
 func TestTheValidityRunsFromSigningAndNotFromTheBackdatedStart(t *testing.T) {
 	before := time.Now().UTC()
-	job, _, _, err := buildSignableJob(
+	job, _, _, err := draftJob(
 		"", "01JTESTHOST", "service.restart", `{"unit":"nginx.service"}`, "", time.Hour)
 	if err != nil {
 		t.Fatalf("building a signable job: %v", err)
@@ -221,7 +242,7 @@ func TestTheValidityRunsFromSigningAndNotFromTheBackdatedStart(t *testing.T) {
 // the clock on --valid-for, and the window is then exactly as wide as it was asked to be.
 func TestAnExplicitStartIsTheInstantTheValidityRunsFrom(t *testing.T) {
 	start := time.Now().UTC().Add(72 * time.Hour).Truncate(time.Second)
-	job, _, _, err := buildSignableJob("", "01JTESTHOST", "service.restart",
+	job, _, _, err := draftJob("", "01JTESTHOST", "service.restart",
 		`{"unit":"nginx.service"}`, start.Format(time.RFC3339), 30*time.Minute)
 	if err != nil {
 		t.Fatalf("building a signable job: %v", err)

@@ -24,12 +24,10 @@
   <mat-card-content class="!pt-4">
     <p class="text-sm opacity-80 mt-0 max-w-3xl">
       Everything this control plane can authorise on its own: reports, and applying security updates,
-      which it signs with its own key and which each host bounds by its own policy. Not the destructive
-      tier — applying every update, starting, stopping or restarting a unit, rebooting. Those carry a
-      signature made offline by a key listed in that host's own <code>trusted-signers</code>, which this
-      control plane does not hold and a browser is the last place that should ever be. Sign one with
-      <code>hostseal sign</code> and send it to <code>POST /api/v1/jobs</code>; releasing it is what this
-      page can do.
+      which it signs with its own key and which each host bounds by its own policy. The destructive
+      tier — applying every update, starting, stopping or restarting a unit, rebooting — needs a
+      signature from a key listed in that host's own <code>trusted-signers</code>, which this control
+      plane does not hold. That is the card below.
     </p>
 
     <div class="flex flex-wrap gap-4 items-baseline">
@@ -58,6 +56,141 @@
 
     @if (actionError()) {
       <p class="text-sm text-hostseal-bad m-0 mt-2">{{ actionError() }}</p>
+    }
+  </mat-card-content>
+</mat-card>
+
+<mat-card class="mb-8">
+  <mat-card-header>
+    <mat-card-title>Sign a destructive operation</mat-card-title>
+    <mat-card-subtitle>
+      Rebooting, restarting a unit, applying every update. Signed on your machine, by your key.
+    </mat-card-subtitle>
+  </mat-card-header>
+
+  <mat-card-content class="!pt-4">
+    <p class="text-sm opacity-80 mt-0 max-w-3xl">
+      A host runs one of these only if the job carries a signature from a key listed in its own
+      <code>/etc/hostseal/trusted-signers</code> — a file this control plane cannot write. So nothing
+      here signs anything. This form asks the HostSeal signer running on your own machine: it decodes
+      the operation against its own copy of the catalogue, prints what it means in its terminal, waits
+      for you to answer and for your YubiKey to be touched, and hands back a signed job that this page
+      forwards unchanged. <strong>The private key never leaves the token</strong> — not to this
+      browser, not to the control plane. The host still bounds what it will do by its own policy.
+    </p>
+
+    <div class="flex flex-wrap gap-4 items-baseline">
+      <mat-form-field appearance="outline" class="min-w-64">
+        <mat-label>Host</mat-label>
+        <mat-select [ngModel]="signHost()" (ngModelChange)="signHost.set($event)">
+          @for (host of hosts(); track host.id) {
+            <mat-option [value]="host.id" [disabled]="host.revoked">
+              {{ host.hostname }}@if (host.revoked) { <span class="opacity-60"> (revoked)</span> }
+            </mat-option>
+          }
+        </mat-select>
+      </mat-form-field>
+
+      <mat-form-field appearance="outline" class="grow min-w-72">
+        <mat-label>Operation</mat-label>
+        <mat-select [ngModel]="signIntent()" (ngModelChange)="signIntent.set($event)">
+          @for (entry of signableIntents(); track entry.name) {
+            <mat-option [value]="entry.name">{{ entry.name }} — {{ entry.summary }}</mat-option>
+          }
+        </mat-select>
+      </mat-form-field>
+    </div>
+
+    <div class="flex flex-wrap gap-4 items-baseline">
+      <mat-form-field appearance="outline" class="grow min-w-72">
+        <mat-label>Parameters (JSON)</mat-label>
+        <input matInput autocomplete="off" spellcheck="false"
+               [ngModel]="signParams()" (ngModelChange)="signParams.set($event)" />
+        <mat-hint>
+          What the operation needs, for example <code>&#123;"unit": "nginx.service"&#125;</code>. Your
+          signer checks it against the catalogue before it asks you anything.
+        </mat-hint>
+      </mat-form-field>
+
+      <mat-form-field appearance="outline" class="w-40">
+        <mat-label>Valid for (minutes)</mat-label>
+        <input matInput type="number" min="1"
+               [ngModel]="signValidMinutes()" (ngModelChange)="signValidMinutes.set(+$event)" />
+        <mat-hint>How long it can still reach a host that is offline.</mat-hint>
+      </mat-form-field>
+    </div>
+
+    @if (signerStatus(); as signer) {
+      <p class="text-sm m-0 mt-2">
+        Signer found: <strong>{{ signer.keyId }}</strong> ({{ signer.backend }},
+        {{ signer.algorithm }}) on {{ signerUrl }}. A host acts on what this key signs only if
+        <code>{{ signer.keyId }}</code> is in its own <code>/etc/hostseal/trusted-signers</code>.
+      </p>
+    }
+
+    @if (signerState() === 'waiting') {
+      <div class="flex flex-col gap-2 mt-3">
+        <mat-progress-bar mode="indeterminate"
+                          aria-label="Waiting for the local signer"></mat-progress-bar>
+        <p class="m-0 text-sm opacity-80">
+          Waiting for your signer: read the operation in its terminal, answer it, then touch your
+          YubiKey. Nothing is queued unless you do.
+        </p>
+      </div>
+    }
+
+    @if (signerError()) {
+      <pre class="m-0 mt-3 text-sm text-hostseal-bad whitespace-pre-wrap">{{ signerError() }}</pre>
+    }
+
+    <div class="flex flex-wrap gap-3 items-center mt-4">
+      <button mat-flat-button [disabled]="!canSign()" (click)="signAndQueue()">
+        <mat-icon>key</mat-icon>
+        Sign with your token and queue it
+      </button>
+      <button mat-button [disabled]="signerState() !== ''" (click)="findSigner()">
+        {{ signerStatus() ? 'Check the signer again' : 'Find my signer' }}
+      </button>
+      <button mat-button (click)="toggleTerminalPath()">
+        {{ showTerminalPath() ? 'Hide the terminal way' : 'Sign in a terminal instead' }}
+      </button>
+    </div>
+
+    @if (showTerminalPath()) {
+      <div class="mt-4 flex flex-col gap-3">
+        <p class="m-0 text-sm opacity-80 max-w-3xl">
+          The same act with two more steps, and the one to use when the signer is not running. Run
+          this where your key is, then paste what it prints back here — the signature covers the whole
+          document, so this page forwards it exactly as it arrived.
+        </p>
+
+        <pre class="m-0 text-xs"><code>{{ signCommand() }}</code></pre>
+
+        <div>
+          <button mat-button (click)="copySignCommand()">
+            <mat-icon>content_copy</mat-icon>
+            Copy the command
+          </button>
+        </div>
+
+        <mat-form-field appearance="outline">
+          <mat-label>The signed job it printed</mat-label>
+          <textarea matInput rows="8" spellcheck="false"
+                    [ngModel]="pastedJob()" (ngModelChange)="pastedJob.set($event)"></textarea>
+          <mat-hint>The whole JSON document, braces included.</mat-hint>
+        </mat-form-field>
+
+        @if (pasteError()) {
+          <p class="m-0 text-sm text-hostseal-bad">{{ pasteError() }}</p>
+        }
+
+        <div>
+          <button mat-flat-button [disabled]="busy() || pastedJob().length === 0"
+                  (click)="queuePasted()">
+            Queue the signed job
+          </button>
+        </div>
+      </div>
     }
   </mat-card-content>
 </mat-card>

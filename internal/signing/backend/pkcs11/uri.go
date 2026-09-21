@@ -1,5 +1,3 @@
-//go:build !windows
-
 package pkcs11
 
 import (
@@ -125,16 +123,16 @@ func parseURI(ref string) (uri, error) {
 				"from the process list by every user on the machine; use pin-source=/path/to/file, or " +
 				"let the tool prompt")
 		case "module-name":
-			return uri{}, fmt.Errorf("pkcs11: module-name needs a module registry this build does not " +
-				"consult; give module-path=/path/to/module.so instead")
+			return uri{}, fmt.Errorf("pkcs11: module-name needs a module registry this build does not "+
+				"consult; give module-path=%s — the path to the module itself — instead", exampleModulePath)
 		default:
 			return uri{}, fmt.Errorf("pkcs11: %q is not a PKCS#11 URI query attribute", name)
 		}
 	}
 
 	if out.modulePath == "" {
-		return uri{}, fmt.Errorf("pkcs11: the reference needs module-path=/path/to/module.so — " +
-			"for example pkcs11:token=ops;object=ops-yubikey-1?module-path=/usr/lib/opensc-pkcs11.so")
+		return uri{}, fmt.Errorf("pkcs11: the reference needs module-path=<the PKCS#11 module> — "+
+			"for example pkcs11:token=ops;object=ops-yubikey-1?module-path=%s", exampleModulePath)
 	}
 	if out.object == "" && len(out.id) == 0 {
 		return uri{}, fmt.Errorf("pkcs11: the reference needs object=<label> or id=<hex> to say which " +

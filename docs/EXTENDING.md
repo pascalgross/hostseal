@@ -171,7 +171,7 @@ Implemented today:
 | Backend | Reference scheme | What holds the key |
 | --- | --- | --- |
 | `file` | `file:`, or any path | A passphrase-protected key file: scrypt over the passphrase, NaCl secretbox over a PKCS#8 key |
-| `pkcs11` | `pkcs11:` | Any PKCS#11 module — YubiKey PIV, Nitrokey and SoftHSM through one implementation |
+| `pkcs11` | `pkcs11:` | Any PKCS#11 module — YubiKey PIV, Nitrokey and SoftHSM through one implementation, on Linux and on Windows |
 | `kms` | `awskms:`, `gcpkms:`, `azurekms:` | AWS KMS, Google Cloud KMS or Azure Key Vault, over their REST APIs and no vendor SDK |
 
 The middle column has more entries than the first on purpose: one backend registers three schemes,
@@ -225,6 +225,17 @@ worth knowing about — pure Ed25519 needs `MessageType: RAW`, which caps a payl
 
 A backend reports what a key can do rather than assuming: the algorithm comes from the key itself, and
 one this build cannot carry fails when the key is opened, with a message naming what it actually is.
+
+**`pkcs11` runs on Windows as well as Linux**, which matters because an operator's workstation is very
+often a Windows one while the fleet is not — and before it did, a person with a YubiKey and a Windows
+laptop had to keep the destructive tier's key in a file somewhere, which is the thing the token was
+bought to avoid. One ABI, one URI parser, one slot search; the platform difference is three functions,
+`dlopen`/`dlsym`/`dlclose` against `LoadLibraryEx`/`GetProcAddress`/`FreeLibrary`, in
+`dl_unix.go` and `dl_windows.go`. `LOAD_WITH_ALTERED_SEARCH_PATH` is passed with an absolute path so a
+module finds the libraries shipped beside it — Yubico's `libykcs11.dll` is not one file — rather than
+whatever is earliest on `PATH`. No vendor is hard-coded and no path is searched: the module the
+reference names is the module that is loaded, on both platforms. A Windows *host* links none of this
+and needs none of it; it executes the read tier, which carries no signature at all.
 
 Whatever the backend, the audit log and the UI always record **which** signer authorised a job:
 `ops-laptop (file)` must read differently from `ops-yubikey-1 (PKCS#11)`.

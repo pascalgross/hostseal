@@ -1,5 +1,3 @@
-//go:build !windows
-
 package pkcs11
 
 import (
@@ -15,8 +13,6 @@ import (
 	"sync"
 	"testing"
 	"unsafe"
-
-	"github.com/ebitengine/purego"
 
 	"github.com/pascalgross/hostseal/internal/signing"
 	"github.com/pascalgross/hostseal/internal/signing/backend"
@@ -252,7 +248,7 @@ func generateFixtureKeys(path string) error {
 
 // fixtureFunctions binds the three extra entry points the fixture needs.
 func fixtureFunctions(mod *module, path string) (*fixtureModule, error) {
-	handle, err := purego.Dlopen(path, purego.RTLD_NOW|purego.RTLD_LOCAL)
+	handle, err := dlOpen(path)
 	if err != nil {
 		return nil, err
 	}
@@ -266,9 +262,9 @@ func fixtureFunctions(mod *module, path string) (*fixtureModule, error) {
 	}
 
 	out := &fixtureModule{module: mod}
-	purego.RegisterFunc(&out.initToken, raw.fn[fnInitToken])
-	purego.RegisterFunc(&out.initPIN, raw.fn[fnInitPIN])
-	purego.RegisterFunc(&out.generateKeyPair, raw.fn[fnGenerateKeyPair])
+	bindAddress(&out.initToken, raw.fn[fnInitToken])
+	bindAddress(&out.initPIN, raw.fn[fnInitPIN])
+	bindAddress(&out.generateKeyPair, raw.fn[fnGenerateKeyPair])
 	return out, nil
 }
 

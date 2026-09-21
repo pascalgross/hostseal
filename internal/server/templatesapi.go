@@ -5,7 +5,6 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
-	"regexp"
 	"strconv"
 	"time"
 
@@ -13,17 +12,6 @@ import (
 	"github.com/pascalgross/hostseal/internal/signing"
 	"github.com/pascalgross/hostseal/internal/store"
 )
-
-// templateNamePattern is the only shape a template name may take.
-//
-// A name is typed by an operator on a command line — `hostseal enroll --bootstrap standard-server` —
-// and recorded in a host's permanent bootstrap record, so it is kept to the characters that survive
-// both without quoting. An allowlist rather than a denylist, for the same reason job ids are.
-var templateNamePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,63}$`)
-
-// templateNameShape describes the accepted shape, for error messages that say what to do instead.
-const templateNameShape = "lower-case letters, digits and hyphens, starting with a letter or digit, " +
-	"at most 64 characters"
 
 // MaxTemplateRequestBytes bounds a template-save request body.
 //
@@ -75,6 +63,12 @@ type templateSummaryView struct {
 
 	// Signed reports whether the latest version can be issued to an enrolling host at all.
 	Signed bool `json:"signed"`
+
+	// SignerKeyID names the key that signed the latest version, empty when unsigned.
+	SignerKeyID string `json:"signerKeyId,omitempty"`
+
+	// SignerAlgorithm is that signature's algorithm, empty when unsigned.
+	SignerAlgorithm string `json:"signerAlgorithm,omitempty"`
 }
 
 // templateView is one template version in full, body included.
@@ -93,6 +87,14 @@ type templateView struct {
 
 	// SignerKeyID names the key that signed it, empty when unsigned.
 	SignerKeyID string `json:"signerKeyId,omitempty"`
+
+	// SignerAlgorithm is "ed25519" or "ecdsa-p256", empty when unsigned.
+	//
+	// Beside the key id rather than instead of it, because the pair is what an operator needs to check
+	// a host's trusted-signers against: a line there carries an algorithm and a key id, and a version
+	// signed by the right person with a key the host lists under the other algorithm is refused at
+	// enrolment with nothing on this page to explain why.
+	SignerAlgorithm string `json:"signerAlgorithm,omitempty"`
 
 	// CreatedAt is when this version was stored.
 	CreatedAt time.Time `json:"createdAt"`
@@ -120,11 +122,13 @@ func (s *Server) handleListTemplates(w http.ResponseWriter, r *http.Request, who
 	views := make([]templateSummaryView, 0, len(summaries))
 	for _, t := range summaries {
 		views = append(views, templateSummaryView{
-			Name:          t.Name,
-			LatestVersion: t.LatestVersion,
-			CreatedAt:     t.CreatedAt,
-			CreatedBy:     t.CreatedBy,
-			Signed:        t.Signed,
+			Name:            t.Name,
+			LatestVersion:   t.LatestVersion,
+			CreatedAt:       t.CreatedAt,
+			CreatedBy:       t.CreatedBy,
+			Signed:          t.Signed,
+			SignerKeyID:     t.SignerKeyID,
+			SignerAlgorithm: t.SignerAlgorithm,
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"templates": views})
@@ -144,9 +148,9 @@ func (s *Server) handleCreateTemplate(w http.ResponseWriter, r *http.Request, wh
 		return
 	}
 
-	if !templateNamePattern.MatchString(req.Name) {
+	if !provision.ValidName(req.Name) {
 		writeError(w, http.StatusBadRequest, "malformed",
-			"a template name is "+templateNameShape+"; it is typed on an enrolment command line and "+
+			"a template name is "+provision.NameShape+"; it is typed on an enrolment command line and "+
 				"recorded permanently on hosts")
 		return
 	}
@@ -201,11 +205,13 @@ func (s *Server) handleCreateTemplate(w http.ResponseWriter, r *http.Request, wh
 		"operator", who.Principal(), "signed", record.Signed(), "signer", req.SignerKeyID)
 
 	writeJSON(w, http.StatusCreated, map[string]any{
-		"name":         req.Name,
-		"version":      version,
-		"signed":       record.Signed(),
-		"placeholders": provision.Placeholders(req.Body),
-		"warnings":     warningsOrEmpty(provision.Warnings(req.Body)),
+		"name":            req.Name,
+		"version":         version,
+		"signed":          record.Signed(),
+		"signerKeyId":     req.SignerKeyID,
+		"signerAlgorithm": req.SignerAlgorithm,
+		"placeholders":    provision.Placeholders(req.Body),
+		"warnings":        warningsOrEmpty(provision.Warnings(req.Body)),
 	})
 }
 
@@ -280,15 +286,16 @@ func (s *Server) handleGetTemplate(w http.ResponseWriter, r *http.Request, who o
 
 	noStore(w)
 	writeJSON(w, http.StatusOK, templateView{
-		Name:         record.Name,
-		Version:      record.Version,
-		Body:         string(body),
-		Signed:       record.Signed(),
-		SignerKeyID:  record.SignerKeyID,
-		CreatedAt:    record.CreatedAt,
-		CreatedBy:    record.CreatedBy,
-		Placeholders: provision.Placeholders(string(body)),
-		Warnings:     warningsOrEmpty(provision.Warnings(string(body))),
+		Name:            record.Name,
+		Version:         record.Version,
+		Body:            string(body),
+		Signed:          record.Signed(),
+		SignerKeyID:     record.SignerKeyID,
+		SignerAlgorithm: record.SignerAlgorithm,
+		CreatedAt:       record.CreatedAt,
+		CreatedBy:       record.CreatedBy,
+		Placeholders:    provision.Placeholders(string(body)),
+		Warnings:        warningsOrEmpty(provision.Warnings(string(body))),
 	})
 }
 
@@ -302,6 +309,9 @@ type templateRevisionView struct {
 
 	// SignerKeyID names the key that signed it, empty when unsigned.
 	SignerKeyID string `json:"signerKeyId,omitempty"`
+
+	// SignerAlgorithm is "ed25519" or "ecdsa-p256", empty when unsigned.
+	SignerAlgorithm string `json:"signerAlgorithm,omitempty"`
 
 	// CreatedAt is when it was stored.
 	CreatedAt time.Time `json:"createdAt"`
@@ -336,11 +346,12 @@ func (s *Server) handleListTemplateVersions(w http.ResponseWriter, r *http.Reque
 	views := make([]templateRevisionView, 0, len(revisions))
 	for _, rev := range revisions {
 		views = append(views, templateRevisionView{
-			Version:     rev.Version,
-			Signed:      rev.Signed,
-			SignerKeyID: rev.SignerKeyID,
-			CreatedAt:   rev.CreatedAt,
-			CreatedBy:   rev.CreatedBy,
+			Version:         rev.Version,
+			Signed:          rev.Signed,
+			SignerKeyID:     rev.SignerKeyID,
+			SignerAlgorithm: rev.SignerAlgorithm,
+			CreatedAt:       rev.CreatedAt,
+			CreatedBy:       rev.CreatedBy,
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{

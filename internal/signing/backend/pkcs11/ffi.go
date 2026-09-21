@@ -1,5 +1,3 @@
-//go:build !windows
-
 package pkcs11
 
 import (
@@ -20,6 +18,11 @@ import (
 // a reproducibility claim the project asks people to check. purego keeps the build exactly as it is,
 // at the price of an ABI that the compiler cannot check — which is what the size assertions in
 // pkcs11_test.go are for.
+//
+// Loading the library is the one thing in here that is not portable, and it is the one thing this file
+// does not do: dl_unix.go and dl_windows.go hold `dlopen` and `LoadLibraryEx` respectively, and the ABI
+// below is shared by both. PKCS#11 is one specification on every platform, so a second copy of these
+// entry-point indices for Windows would have been six hundred lines that can drift for no reason.
 //
 // The library is loaded only when an operator hands `hostseal sign` a pkcs11: reference naming a
 // module. It is emphatically not the plugin loader docs/EXTENDING.md refuses: that refusal is about
@@ -239,7 +242,8 @@ func (t tokenIdentity) String() string {
 // load time rather than dispatching per call is what keeps every unsafe conversion in this file to the
 // arguments themselves.
 type module struct {
-	// handle is the dlopen handle, closed with the module.
+	// handle is the loaded library's handle — dlopen's on Unix, LoadLibraryEx's on Windows — closed
+	// with the module.
 	handle uintptr
 
 	// path is what was loaded, for error messages that name the module rather than the operation.
@@ -306,24 +310,24 @@ func check(op string, rv ckReturn) error {
 // requires a module to export; the other 67 are pointers inside the struct it fills, and several
 // vendor modules export nothing else.
 func openModule(path string) (*module, error) {
-	handle, err := purego.Dlopen(path, purego.RTLD_NOW|purego.RTLD_LOCAL)
+	handle, err := dlOpen(path)
 	if err != nil {
 		return nil, fmt.Errorf("pkcs11: cannot load the module %s: %w", path, err)
 	}
 
 	var getFunctionList func(list unsafe.Pointer) ckReturn
 	if err := bind(handle, &getFunctionList, "C_GetFunctionList"); err != nil {
-		_ = purego.Dlclose(handle)
+		_ = dlClose(handle)
 		return nil, fmt.Errorf("pkcs11: %s is not a PKCS#11 module: %w", path, err)
 	}
 
 	var list *functionList
 	if rv := getFunctionList(unsafe.Pointer(&list)); rv != ckrOK {
-		_ = purego.Dlclose(handle)
+		_ = dlClose(handle)
 		return nil, check("C_GetFunctionList", rv)
 	}
 	if list == nil {
-		_ = purego.Dlclose(handle)
+		_ = dlClose(handle)
 		return nil, fmt.Errorf("pkcs11: %s returned no function list", path)
 	}
 
@@ -351,28 +355,36 @@ func openModule(path string) (*module, error) {
 		{fnSign, &m.sign},
 	} {
 		if list.fn[entry.index] == 0 {
-			_ = purego.Dlclose(handle)
+			_ = dlClose(handle)
 			return nil, fmt.Errorf("pkcs11: %s implements no entry point at index %d", path, entry.index)
 		}
-		purego.RegisterFunc(entry.target, list.fn[entry.index])
+		bindAddress(entry.target, list.fn[entry.index])
 	}
 	return m, nil
 }
 
 // bind resolves one named symbol into a Go function value.
 func bind(handle uintptr, target any, symbol string) error {
-	address, err := purego.Dlsym(handle, symbol)
+	address, err := dlSym(handle, symbol)
 	if err != nil {
-		return fmt.Errorf("symbol %s: %w", symbol, err)
+		return err
 	}
-	purego.RegisterFunc(target, address)
+	bindAddress(target, address)
 	return nil
 }
+
+// bindAddress binds a C function pointer to a Go function value.
+//
+// It is the one line of purego that is not platform-specific — the call layer supports every platform
+// this project builds for, and only the loader in dl_unix.go and dl_windows.go differs — and it is a
+// function rather than a call at each site so that the whole of the FFI surface is nameable: `bind`,
+// `bindAddress` and the three loader calls, and nothing else in the project touches a C ABI.
+func bindAddress(target any, address uintptr) { purego.RegisterFunc(target, address) }
 
 // close releases the library.
 func (m *module) close() {
 	if m.handle != 0 {
-		_ = purego.Dlclose(m.handle)
+		_ = dlClose(m.handle)
 		m.handle = 0
 	}
 }

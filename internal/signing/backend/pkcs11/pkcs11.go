@@ -1,5 +1,3 @@
-//go:build !windows
-
 // Package pkcs11 implements the hardware-token signing backend, over any PKCS#11 module.
 //
 // It exists because the file backend keeps the destructive key in a passphrase-protected file on an

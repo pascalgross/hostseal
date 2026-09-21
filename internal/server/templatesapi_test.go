@@ -707,3 +707,46 @@ func TestABootstrapIsCheckedWhereItsBytesAreChosen(t *testing.T) {
 		t.Fatalf("the token did not survive the refusal: %d %s", status, raw)
 	}
 }
+
+// TestASignedVersionNamesItsKeyAndAlgorithmEverywhereItIsListed keeps the browser able to say what a
+// host will check.
+//
+// "Signed" on its own answers half the operator's question. A `trusted-signers` line carries an
+// algorithm as well as a key id, and a version signed by the right person under the other algorithm is
+// refused at enrolment — so a page that could only say "signed" would leave somebody comparing one
+// half of a line against a host they cannot see. The three places a version appears have to agree
+// about it: the summary listing, the version itself, and the revision history.
+func TestASignedVersionNamesItsKeyAndAlgorithmEverywhereItIsListed(t *testing.T) {
+	h := newHarness(t)
+
+	_, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generating the operator key: %v", err)
+	}
+	body := "#cloud-config\nhostname: signed\n"
+	payload, err := canonical.Marshal(protocol.Bootstrap{Name: "standard-server", Body: body}.SignedPayload())
+	if err != nil {
+		t.Fatalf("canonicalising: %v", err)
+	}
+	h.saveTemplate(t, h.adminToken, map[string]any{
+		"name": "standard-server", "body": body,
+		"signature":   base64.StdEncoding.EncodeToString(ed25519.Sign(private, payload)),
+		"signerKeyId": "ops-yubikey-1", "signerAlgorithm": "ed25519",
+	})
+
+	for _, path := range []string{
+		"/api/v1/templates",
+		"/api/v1/templates/standard-server",
+		"/api/v1/templates/standard-server/versions",
+	} {
+		status, raw := h.adminJSON(t, h.adminToken, http.MethodGet, path, nil)
+		if status != http.StatusOK {
+			t.Fatalf("%s: %d %s", path, status, raw)
+		}
+		for _, want := range []string{`"signerKeyId":"ops-yubikey-1"`, `"signerAlgorithm":"ed25519"`} {
+			if !strings.Contains(string(raw), want) {
+				t.Errorf("%s does not carry %s: %s", path, want, raw)
+			}
+		}
+	}
+}

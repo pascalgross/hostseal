@@ -64,11 +64,13 @@ func (s *scopedMemory) ListTemplates(_ context.Context) ([]TemplateSummary, erro
 	out := make([]TemplateSummary, 0, len(latest))
 	for _, t := range latest {
 		out = append(out, TemplateSummary{
-			Name:          t.Name,
-			LatestVersion: t.Version,
-			CreatedAt:     t.CreatedAt,
-			CreatedBy:     t.CreatedBy,
-			Signed:        t.Signed(),
+			Name:            t.Name,
+			LatestVersion:   t.Version,
+			CreatedAt:       t.CreatedAt,
+			CreatedBy:       t.CreatedBy,
+			Signed:          t.Signed(),
+			SignerKeyID:     t.SignerKeyID,
+			SignerAlgorithm: t.SignerAlgorithm,
 		})
 	}
 	sort.Slice(out, func(i, j int) bool {
@@ -93,11 +95,12 @@ func (s *scopedMemory) ListTemplateVersions(_ context.Context, name string) ([]T
 			continue
 		}
 		out = append(out, TemplateRevision{
-			Version:     t.Version,
-			CreatedAt:   t.CreatedAt,
-			CreatedBy:   t.CreatedBy,
-			Signed:      t.Signed(),
-			SignerKeyID: t.SignerKeyID,
+			Version:         t.Version,
+			CreatedAt:       t.CreatedAt,
+			CreatedBy:       t.CreatedBy,
+			Signed:          t.Signed(),
+			SignerKeyID:     t.SignerKeyID,
+			SignerAlgorithm: t.SignerAlgorithm,
 		})
 	}
 	if len(out) == 0 {

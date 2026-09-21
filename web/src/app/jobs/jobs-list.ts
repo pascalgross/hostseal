@@ -5,29 +5,55 @@ import { MatCardModule } from '@angular/material/card';
 import { MatChipsModule } from '@angular/material/chips';
 import { MatFormFieldModule } from '@angular/material/form-field';
 import { MatIconModule } from '@angular/material/icon';
+import { MatInputModule } from '@angular/material/input';
 import { MatProgressBarModule } from '@angular/material/progress-bar';
 import { MatSelectModule } from '@angular/material/select';
 import { MatTableModule } from '@angular/material/table';
 import { MatTooltipModule } from '@angular/material/tooltip';
 import { RouterLink } from '@angular/router';
 
-import { CatalogueEntry, Host, Job } from '../core/api.models';
+import { CatalogueEntry, Host, Job, SignedJob } from '../core/api.models';
 import { ApiService } from '../core/api.service';
 import { describeError } from '../core/errors';
 import { formatAge } from '../core/format';
+import {
+  LOCAL_SIGNER_URL,
+  LocalSignerService,
+  LocalSignerStatus,
+  describeSignerError,
+} from '../core/local-signer.service';
+
+/**
+ * How long a signature stays valid when the form's own field is empty or half-typed.
+ *
+ * An hour, which is what `hostseal sign` and the signer both default to — stated here rather than left
+ * to the signer's default so that the page never sends a number it did not mean. The window is the
+ * blast radius of a signature: it is how long the job can still reach a host that was switched off.
+ */
+const DEFAULT_VALID_MINUTES = 60;
 
 /**
  * The jobs page: what has been asked of the fleet, and what came back.
  *
- * Only read-only work can be started from here, and that is not a limitation of the page. A destructive
- * job carries a signature made offline by a key the control plane does not hold, and a browser is the
- * last place that key should ever be — so the form offers what a browser can legitimately authorise and
- * says plainly why the rest is not there, rather than presenting a control that cannot work.
+ * Two forms, because there are two kinds of authorisation and conflating them would misrepresent both.
+ * A read or routine job is authorised by the operator's own credential and the control plane's key, so
+ * the first form queues one directly. A destructive job needs a signature from a key in the target
+ * host's own `trusted-signers`, which this control plane does not hold and a browser must never hold
+ * either — so the second form does not sign anything: it asks the HostSeal signer running on the
+ * operator's own machine, which decodes the operation against its own catalogue, prints what it means
+ * in its terminal, waits for a human there and a touch on a token, and hands back a signed job this
+ * page forwards unchanged.
  *
- * What the page *can* do for a destructive job is release one, which is the half that belongs in a
- * control plane. Whether a job needs releasing at all, and whether the releaser has to be somebody
- * other than its creator, is a setting on the fleet — and it is read from the job rather than from the
- * fleet, because a job records the rule it was created under.
+ * For an operator without a signer running, the same form prints the `hostseal sign` command for what
+ * they filled in and takes the signed document back by paste. That is the same act with two more steps,
+ * and it is here because the alternative — a page that names a command and leaves the operator to
+ * assemble the arguments and then find curl — is the one thing this page used to do and the reason it
+ * read as a dead end.
+ *
+ * What the page does with a signed job either way is store it and release it, which is the half that
+ * belongs in a control plane. Whether a job needs releasing at all, and whether the releaser has to be
+ * somebody other than its creator, is a setting on the fleet — and it is read from the job rather than
+ * from the fleet, because a job records the rule it was created under.
  */
 @Component({
   selector: 'hostseal-jobs-list',
@@ -38,6 +64,7 @@ import { formatAge } from '../core/format';
     MatChipsModule,
     MatFormFieldModule,
     MatIconModule,
+    MatInputModule,
     MatProgressBarModule,
     MatSelectModule,
     MatTableModule,
@@ -50,6 +77,14 @@ import { formatAge } from '../core/format';
 export class JobsList {
   /** Talks to the control plane. */
   private readonly api = inject(ApiService);
+
+  /**
+   * Talks to the signer on the operator's own machine.
+   *
+   * The one thing this page reaches that the control plane does not run, cannot reach, and must never
+   * be able to impersonate — which is precisely why a signature from it means something here.
+   */
+  private readonly localSigner = inject(LocalSignerService);
 
   /** The columns rendered, in order. */
   protected readonly columns = ['intent', 'host', 'state', 'authorisation', 'created', 'actions'];
@@ -136,13 +171,12 @@ export class JobsList {
   protected readonly now = signal(new Date().toISOString());
 
   /**
-   * The operations this page will offer to start.
+   * The operations this page will queue without a signature.
    *
    * Everything the control plane can authorise on its own: read intents, which need no signature at
-   * all, and the routine one, which the control plane signs with its own key. What is missing is the
-   * destructive tier, and that is permanent rather than pending — it needs a signature made by a key
-   * listed in the host's own trusted-signers, which this control plane does not hold and a browser is
-   * the last place it should ever be. Sign one with `hostseal sign` and post it.
+   * all, and the routine one, which the control plane signs with its own key. The destructive tier is
+   * deliberately absent from this list and has a form of its own, because what it needs is not another
+   * button here but a signature from a key this control plane does not hold.
    */
   protected readonly startableIntents = computed(() =>
     this.intents().filter(
@@ -150,10 +184,106 @@ export class JobsList {
     ),
   );
 
+  /**
+   * The operations that need a signature from the host's own trusted-signers.
+   *
+   * Offered rather than hidden, which is the change this form is: the page used to name the tier,
+   * explain why it was not there, and leave an operator to assemble a command by hand. Naming the
+   * operations is not the same as being able to authorise them — nothing here can sign, and the
+   * signature still comes from a key on somebody's own machine.
+   */
+  protected readonly signableIntents = computed(() =>
+    this.intents().filter((entry) => entry.implemented && entry.requiresOfflineSignature),
+  );
+
+  /** Where a HostSeal signer listens, for the message that tells an operator to start one. */
+  protected readonly signerUrl = LOCAL_SIGNER_URL;
+
+  /**
+   * The address this page was served from, which is what a signer has to be told to sign for.
+   *
+   * Read once and held, so the instructions this page prints are the ones that will actually work: a
+   * signer started with any other --origin refuses every request from here.
+   */
+  protected readonly origin = typeof location === 'undefined' ? '' : location.origin;
+
+  /** The local signer that answered, null when none has been found in this session. */
+  protected readonly signerStatus = signal<LocalSignerStatus | null>(null);
+
+  /** Why the local signer could not be reached or would not sign, empty when it did. */
+  protected readonly signerError = signal('');
+
+  /** What the signer is doing: being looked for, or waiting for a human and a token. */
+  protected readonly signerState = signal<'' | 'finding' | 'waiting'>('');
+
+  /** The host the destructive form is about. */
+  protected readonly signHost = signal('');
+
+  /** The operation the destructive form is about. */
+  protected readonly signIntent = signal('');
+
+  /**
+   * The parameters for that operation, as JSON.
+   *
+   * A JSON field rather than a generated form, because the catalogue tells this page which operations
+   * exist and not what each one's parameters are — and a form built from a guess would be a form that
+   * silently omits the field an operator needed. The signer decodes this against the real catalogue
+   * and refuses what it cannot read, before anybody is asked to touch a token.
+   */
+  protected readonly signParams = signal('{}');
+
+  /**
+   * How long the signature stays valid, in minutes.
+   *
+   * It is on the form rather than fixed because the window is the blast radius of a signature: an
+   * hour is right for "restart this now", and a change window that opens after the shop closes is a
+   * legitimate reason to ask for longer. The signer has a ceiling of its own.
+   */
+  protected readonly signValidMinutes = signal(60);
+
+  /** A signed job pasted in from a terminal, empty when none is. */
+  protected readonly pastedJob = signal('');
+
+  /** Why the pasted document could not be queued, empty when it was. */
+  protected readonly pasteError = signal('');
+
+  /** Whether the terminal path — the command to copy, the box to paste into — is on screen. */
+  protected readonly showTerminalPath = signal(false);
+
   /** Whether the form has enough to submit. */
   protected readonly canCreateJob = computed(
     () => this.chosenHost().length > 0 && this.chosenIntent().length > 0 && !this.busy(),
   );
+
+  /** Whether the destructive form has enough to ask for a signature. */
+  protected readonly canSign = computed(
+    () =>
+      this.signHost().length > 0 &&
+      this.signIntent().length > 0 &&
+      this.signerState() === '' &&
+      !this.busy(),
+  );
+
+  /**
+   * The `hostseal sign` command for what the destructive form currently holds.
+   *
+   * It exists for the operator who has no signer running and for the one who would rather see the
+   * command than trust a button — and, more usefully, for both to be able to check that the page and
+   * the terminal are asking for the same thing. The key reference is left as a placeholder because it
+   * is the one part of this that belongs to the person rather than to the job.
+   *
+   * The parameters are collapsed onto one line so the command survives being copied into a shell.
+   */
+  protected readonly signCommand = computed(() => {
+    const params = this.signParams().replace(/\s+/g, ' ').trim() || '{}';
+    return (
+      `hostseal sign --key <your key> \\\n` +
+      `  --host ${this.signHost() || '<host id>'} \\\n` +
+      `  --intent ${this.signIntent() || '<operation>'} \\\n` +
+      `  --params '${params}' \\\n` +
+      `  --valid-for ${this.signValidMinutes()}m`
+    );
+  });
 
   /** Loads everything the page shows. */
   constructor() {
@@ -212,6 +342,146 @@ export class JobsList {
           this.actionError.set(describeError(err));
         },
       });
+  }
+
+  /**
+   * Looks for a signer on this machine, and remembers what it says.
+   *
+   * Asked for rather than probed on load, so that an operator who never signs from a browser does not
+   * get a failed loopback request in their console every time this page opens.
+   */
+  protected findSigner(): void {
+    this.signerError.set('');
+    this.signerState.set('finding');
+    this.localSigner.status().subscribe({
+      next: (status) => {
+        this.signerState.set('');
+        this.signerStatus.set(status);
+      },
+      error: (err: unknown) => {
+        this.signerState.set('');
+        this.signerStatus.set(null);
+        this.signerError.set(describeSignerError(err, this.origin));
+        this.showTerminalPath.set(true);
+      },
+    });
+  }
+
+  /**
+   * Asks the local signer for a signature over the destructive form, then queues what comes back.
+   *
+   * What crosses to the signer is the host, the operation and its parameters. What comes back is a
+   * complete signed job — identifier, nonce and validity window included, all chosen there — which
+   * this page forwards to the control plane unchanged. It is unchanged because it has to be: the
+   * signature covers every one of those fields, so anything the browser rearranged on the way through
+   * would stop verifying on the host, which is exactly the protection being relied on.
+   *
+   * The parameters are parsed here first so that a stray comma is a message under the field rather
+   * than a request that travels to another process to be refused.
+   */
+  protected signAndQueue(): void {
+    let params: Record<string, unknown>;
+    try {
+      params = JSON.parse(this.signParams().trim() || '{}') as Record<string, unknown>;
+    } catch {
+      this.signerError.set('The parameters are not valid JSON. An empty object is {} .');
+      return;
+    }
+
+    // A cleared or half-typed field is a number this page should not send: it would arrive as zero,
+    // which the signer reads as "use your default" — an hour, silently, where the operator was in the
+    // middle of typing five. Falling back to the value the field shows when it is empty is the honest
+    // reading of an empty field.
+    const minutes = Number.isFinite(this.signValidMinutes()) ? Math.trunc(this.signValidMinutes()) : 0;
+
+    this.signerError.set('');
+    this.actionError.set('');
+    this.signerState.set('waiting');
+    this.localSigner
+      .signJob({
+        hostId: this.signHost(),
+        intent: this.signIntent(),
+        params,
+        validForSeconds: minutes > 0 ? minutes * 60 : DEFAULT_VALID_MINUTES * 60,
+      })
+      .subscribe({
+        next: (signed) => {
+          this.signerState.set('');
+          this.queueSigned(signed);
+        },
+        error: (err: unknown) => {
+          this.signerState.set('');
+          this.signerError.set(describeSignerError(err, this.origin));
+          this.showTerminalPath.set(true);
+        },
+      });
+  }
+
+  /**
+   * Queues a signed job that was produced in a terminal and pasted in.
+   *
+   * The document goes to the control plane as it arrived. Nothing here inspects or improves it: the
+   * signature covers the whole of it, so a browser that corrected a field would produce a job every
+   * host refuses — and a browser that could usefully correct one would be a browser holding authority
+   * it must not have.
+   */
+  protected queuePasted(): void {
+    let document: SignedJob;
+    try {
+      document = JSON.parse(this.pastedJob()) as SignedJob;
+    } catch {
+      this.pasteError.set(
+        'That is not valid JSON. Paste the whole document `hostseal sign` printed, braces included.',
+      );
+      return;
+    }
+    if (!document?.signature || !document?.hostId) {
+      this.pasteError.set(
+        'That document carries no signature and a host id, so it is not what `hostseal sign` prints. ' +
+          'Paste its output whole.',
+      );
+      return;
+    }
+    this.pasteError.set('');
+    this.queueSigned(document);
+  }
+
+  /** Posts a signed job to the control plane and reloads the list. */
+  private queueSigned(document: SignedJob): void {
+    this.busy.set(true);
+    this.api.createSignedJob(document).subscribe({
+      next: () => {
+        this.busy.set(false);
+        this.pastedJob.set('');
+        this.reload();
+      },
+      error: (err: unknown) => {
+        this.busy.set(false);
+        this.actionError.set(describeError(err));
+      },
+    });
+  }
+
+  /**
+   * Copies the `hostseal sign` command to the clipboard.
+   *
+   * Best-effort and never reported as a failure: the command is on screen and selectable, and a
+   * browser refusing clipboard access must not look like something went wrong with the job.
+   */
+  protected async copySignCommand(): Promise<void> {
+    if (!navigator.clipboard) {
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(this.signCommand());
+    } catch {
+      // Left on screen for a manual copy, which is the fallback that always works.
+    }
+  }
+
+  /** Shows or hides the terminal path — the command to copy and the box to paste a signed job into. */
+  protected toggleTerminalPath(): void {
+    this.showTerminalPath.update((shown) => !shown);
   }
 
   /** Records this operator's release of a destructive job. */

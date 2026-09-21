@@ -786,6 +786,12 @@ export interface TemplateSummary {
    * this control plane cannot produce that signature.
    */
   signed: boolean;
+
+  /** The key that signed the latest version, absent when it is unsigned. */
+  signerKeyId?: string;
+
+  /** That signature's algorithm, absent when the latest version is unsigned. */
+  signerAlgorithm?: string;
 }
 
 /** The response of `GET /api/v1/templates`. */
@@ -810,6 +816,16 @@ export interface TemplateVersion {
 
   /** The key that signed it, absent for an unsigned version. */
   signerKeyId?: string;
+
+  /**
+   * The algorithm that signature was made with, absent for an unsigned version.
+   *
+   * Shown beside the key id rather than instead of it, because the pair is what a `trusted-signers`
+   * line carries: a version signed by the right person with a key the host lists under the other
+   * algorithm is refused at enrolment, and the page an operator is looking at should be able to say
+   * so rather than leave them comparing one half of a line.
+   */
+  signerAlgorithm?: string;
 
   /** When it was stored. */
   createdAt: string;
@@ -849,6 +865,12 @@ export interface StoredTemplateVersion {
   /** Whether it carries an offline signature. */
   signed: boolean;
 
+  /** The key that signed it, absent when it was stored unsigned. */
+  signerKeyId?: string;
+
+  /** That signature's algorithm, absent when it was stored unsigned. */
+  signerAlgorithm?: string;
+
   /** The placeholder names the body substitutes. */
   placeholders: string[];
 
@@ -874,6 +896,9 @@ export interface TemplateRevision {
   /** The key that signed it, absent for an unsigned revision. */
   signerKeyId?: string;
 
+  /** That signature's algorithm, absent for an unsigned revision. */
+  signerAlgorithm?: string;
+
   /** When it was stored. */
   createdAt: string;
 
@@ -888,6 +913,45 @@ export interface TemplateVersionsResponse {
 
   /** Every stored revision, newest first. */
   versions: TemplateRevision[];
+}
+
+/**
+ * A signed job, exactly as `POST /api/v1/jobs` takes it.
+ *
+ * It is forwarded rather than rebuilt: every field here either is covered by the signature or names
+ * the key that made it, and a client that assembled its own version would eventually leave one out —
+ * producing a job the control plane stores and every host refuses.
+ */
+export interface SignedJob {
+  /** The job identifier the signer generated. */
+  id: string;
+
+  /** The host the signature binds this job to. */
+  hostId: string;
+
+  /** The catalogue member. */
+  intent: string;
+
+  /** The parameters, as signed. */
+  params: Record<string, unknown>;
+
+  /** When the job becomes valid, RFC3339. */
+  notBefore: string;
+
+  /** When it stops being valid, checked on the host against the host's own clock. */
+  notAfter: string;
+
+  /** What the host persists to refuse a replayed signature. */
+  nonce: string;
+
+  /** The detached signature, base64. */
+  signature: string;
+
+  /** The key that made it, which must be in the host's own `trusted-signers`. */
+  signerKeyId: string;
+
+  /** The algorithm it was made with. */
+  signerAlgorithm: string;
 }
 
 /** The body of `POST /api/v1/templates`. */

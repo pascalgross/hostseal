@@ -55,7 +55,7 @@
                 @if (template.signed) {
                   <span class="text-xs text-hostseal-ok"
                         [matTooltip]="'Signed offline, so an enrolling agent may be handed it. The agent verifies the signature against its own trusted-signers; this control plane cannot produce one.'">
-                    signed
+                    signed by {{ signedBy(template) }}
                   </span>
                 } @else {
                   <span class="text-xs opacity-70"
@@ -97,10 +97,26 @@
           </mat-form-field>
 
           <p class="m-0 text-sm opacity-80">
-            Saved unsigned. A signature is made offline with <code>hostseal sign-template</code>, by a
-            key this control plane does not hold — which is exactly why an agent will accept a
-            bootstrap signed that way and nothing else.
+            <strong>Save version</strong> stores it unsigned, which is all a template needs to be
+            rendered and pasted into a provisioner. <strong>Sign and save</strong> asks the HostSeal
+            signer on your own machine for a signature first — you confirm the body in its terminal
+            and touch your YubiKey, and only a signed template may be handed to an enrolling agent.
           </p>
+
+          @if (signerState() === 'waiting' && signerWhere() === 'editor') {
+            <div class="flex flex-col gap-2">
+              <mat-progress-bar mode="indeterminate"
+                                aria-label="Waiting for the local signer"></mat-progress-bar>
+              <p class="m-0 text-sm opacity-80">
+                Waiting for your signer: confirm the template in its terminal, then touch your
+                YubiKey. Nothing is stored unless you do.
+              </p>
+            </div>
+          }
+
+          @if (signerError() && signerWhere() === 'editor') {
+            <pre class="m-0 text-sm text-hostseal-bad whitespace-pre-wrap">{{ signerError() }}</pre>
+          }
 
           @if (actionError()) {
             <p class="m-0 text-sm text-hostseal-bad">{{ actionError() }}</p>
@@ -108,6 +124,10 @@
         </mat-card-content>
 
         <mat-card-actions align="end">
+          <button mat-button [disabled]="!canSave() || !canSign()" (click)="signDraft()">
+            <mat-icon>key</mat-icon>
+            Sign and save
+          </button>
           <button mat-flat-button [disabled]="!canSave()" (click)="save()">Save version</button>
         </mat-card-actions>
       </mat-card>
@@ -148,6 +168,80 @@
           </mat-card-content>
         </mat-card>
 
+        <mat-card class="mb-4">
+          <mat-card-header>
+            <mat-card-title>Signature</mat-card-title>
+            <mat-card-subtitle>
+              @if (record.signed) {
+                Signed by {{ signedBy(record) }}.
+              } @else {
+                Not signed. An enrolling agent will refuse this version.
+              }
+            </mat-card-subtitle>
+          </mat-card-header>
+
+          <mat-card-content class="!pt-4 flex flex-col gap-3 text-sm">
+            <p class="m-0 opacity-80">
+              A bootstrap template is applied as root, once, by a host that is enrolling. So a host
+              accepts one only if it carries a signature from a key listed in its own
+              <code>/etc/hostseal/trusted-signers</code> — a file this control plane cannot write and
+              an administrator edits by hand. That is what stops an attacker who owns this control
+              plane from choosing what runs on a new machine.
+            </p>
+            <p class="m-0 opacity-80">
+              The signature is made on your own machine. This page sends the template's name and body
+              to <code>hostseal signer</code> running there; it prints the body in its terminal and
+              asks you, your YubiKey signs it when you touch it, and the detached signature comes
+              back. <strong>The private key never leaves the YubiKey</strong> — not to this browser,
+              not to the control plane, which is the whole reason a host will accept the result.
+            </p>
+
+            @if (signerStatus(); as signer) {
+              <div class="flex flex-col gap-1">
+                <p class="m-0">
+                  Signer found: <strong>{{ signer.keyId }}</strong> ({{ signer.backend }},
+                  {{ signer.algorithm }}) on {{ signerUrl }}.
+                </p>
+                <p class="m-0 opacity-80">
+                  A host applies what this key signs only if this line is in its own
+                  <code>/etc/hostseal/trusted-signers</code>:
+                </p>
+                <pre class="m-0 text-xs"><code>{{ signer.trustedSignerLine }}</code></pre>
+              </div>
+            } @else {
+              <p class="m-0 opacity-80">
+                Start <code>hostseal signer</code> on the machine your token is plugged into, then
+                look for it here.
+              </p>
+            }
+
+            @if (signerState() === 'waiting' && signerWhere() === 'version') {
+              <div class="flex flex-col gap-2">
+                <mat-progress-bar mode="indeterminate"
+                                  aria-label="Waiting for the local signer"></mat-progress-bar>
+                <p class="m-0 opacity-80">
+                  Waiting for your signer: confirm the template in its terminal, then touch your
+                  YubiKey. Nothing is stored unless you do.
+                </p>
+              </div>
+            }
+
+            @if (signerError() && signerWhere() === 'version') {
+              <pre class="m-0 text-hostseal-bad whitespace-pre-wrap">{{ signerError() }}</pre>
+            }
+          </mat-card-content>
+
+          <mat-card-actions align="end">
+            <button mat-button [disabled]="!canSign()" (click)="findSigner()">
+              {{ signerStatus() ? 'Check again' : 'Find my signer' }}
+            </button>
+            <button mat-flat-button [disabled]="!canSign()" (click)="signOpen()">
+              <mat-icon>key</mat-icon>
+              Sign with YubiKey
+            </button>
+          </mat-card-actions>
+        </mat-card>
+
         @if (revisions().length > 1) {
           <mat-card class="mb-4">
             <mat-card-header>
@@ -169,8 +263,8 @@
 
                   @if (revision.signed) {
                     <span class="text-xs text-hostseal-ok"
-                          [matTooltip]="'Signed offline by ' + (revision.signerKeyId || 'an unnamed key') + ', so an enrolling agent may be handed it.'">
-                      signed
+                          [matTooltip]="'Signed offline by ' + (revision.signerKeyId || 'an unnamed key') + ' (' + (revision.signerAlgorithm || 'unknown algorithm') + '), so an enrolling agent may be handed it.'">
+                      signed by {{ signedBy(revision) }}
                     </span>
                   } @else {
                     <span class="text-xs opacity-70"

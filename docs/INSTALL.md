@@ -606,6 +606,9 @@ needs two more things, and neither of them is the control plane's to give.
    It shows you the operation, the host, the window and the exact bytes it is about to sign, and asks
    before signing. It never talks to the control plane: if it signed a digest the server handed it, a
    compromised control plane could display one operation and have another authorised.
+
+   The web interface can do the same thing without the copying — see
+   [signing from the web interface](#signing-from-the-web-interface) below.
 2. Release, if your fleet asks for it — `POST /api/v1/jobs/{id}/approve`. Whether that is required at
    all, and whether the releaser must be somebody other than the job's creator, is your fleet's
    `approvalMode`. A new fleet requires nothing; see
@@ -614,6 +617,64 @@ needs two more things, and neither of them is the control plane's to give.
 A **routine** job — `packages.applySecurity` — needs neither. The control plane signs it with its own
 key, and what bounds it is your host's `updates.allow`: the worst the control plane can do is make a
 host apply security updates sooner than its own timer would have.
+
+### Signing from the web interface
+
+Copying a JSON document out of a terminal and into a browser is not the interesting part of signing,
+and on a Windows workstation it was for a long time the only way to use a YubiKey at all. So the same
+tool will answer the browser directly:
+
+```powershell
+# On the machine your token is plugged into. Windows, with Yubico's PKCS#11 module:
+hostseal signer `
+  --key "pkcs11:token=YubiKey PIV #12345678;object=SIGN key?module-path=C:\Program Files\Yubico\Yubico PIV Tool\bin\libykcs11.dll" `
+  --origin https://hostseal.example.org
+```
+
+```bash
+# The same thing on Linux, with whatever module your token uses:
+hostseal signer \
+  --key 'pkcs11:token=ops;object=ops-yubikey-1?module-path=/usr/lib/opensc-pkcs11.so' \
+  --origin https://hostseal.example.org
+```
+
+It asks for the token's PIN once, prints the `trusted-signers` line for the key it found, and listens
+on `127.0.0.1:18515` — loopback only, and only for the origins you named. The Jobs and Templates pages
+then offer **Sign with your token**: the browser sends what you filled in, the signer decodes it
+against its own copy of the catalogue, prints what it means in *its* terminal, and waits for you to
+answer and to touch the key. What comes back is a signature; what never moves is the key.
+
+Three things are worth knowing before you rely on it:
+
+- **The terminal is the display that counts.** What you confirm there is what gets signed — the signer
+  builds the signed document itself and will not sign anything handed to it. If the terminal shows an
+  operation you did not ask for in the browser, say no: you have just caught a compromised control
+  plane.
+- **`--origin` is not optional and is not a wildcard.** It is the address you open HostSeal at.
+  Without it, any page in your browser could ask your signer for a signature.
+- **The signer exits after half an hour of doing nothing** (`--idle`), because a logged-in token
+  session nobody is using is worth closing. Start it again when you need it.
+
+For an operator without a signer running, the Jobs page prints the `hostseal sign` command for what
+they filled in and takes the signed document back by paste. Same signature, two more steps.
+
+Nothing about the trust model changes: a host applies what a key signed only if that key's line is in
+its own `/etc/hostseal/trusted-signers`, which the control plane cannot write and this signer cannot
+write either. Paste the line it prints onto the hosts that key may act on, by hand, deliberately — and
+for a bootstrap template, the host establishes that anchor from your own file before it fetches
+anything:
+
+```bash
+sudo hostseal enroll \
+  --server https://agents.hostseal.example.org \
+  --token "$HOSTSEAL_TOKEN" \
+  --signers ./trusted-signers \
+  --bootstrap hostseal-baseline
+```
+
+`--bootstrap` refuses without `--signers`, and never falls back to trusting the server: the template
+is verified against the key in the file you just installed, printed in full, and recorded before a byte
+of it runs. See [`SECURITY.md` §7](SECURITY.md#7-provisioning-and-the-enrolment-time-exception).
 
 ## What a fresh host will and will not do
 

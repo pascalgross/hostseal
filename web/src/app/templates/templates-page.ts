@@ -10,6 +10,7 @@ import { MatProgressBarModule } from '@angular/material/progress-bar';
 import { MatTooltipModule } from '@angular/material/tooltip';
 
 import {
+  CreateTemplateRequest,
   RenderedTemplate,
   TemplateRevision,
   TemplateSummary,
@@ -17,6 +18,12 @@ import {
 } from '../core/api.models';
 import { ApiService } from '../core/api.service';
 import { describeError } from '../core/errors';
+import {
+  LOCAL_SIGNER_URL,
+  LocalSignerService,
+  LocalSignerStatus,
+  describeSignerError,
+} from '../core/local-signer.service';
 
 /** The placeholder the control plane mints itself and refuses to accept from a caller. */
 const TOKEN_PLACEHOLDER = 'enrollmentToken';
@@ -29,6 +36,13 @@ const TOKEN_PLACEHOLDER = 'enrollmentToken';
  * delivery path: a template is rendered here and handed to whatever creates the machine — Terraform,
  * a cloud console, a Proxmox form — and the control plane never reaches a host. Tier 3 is never
  * built, and this page deliberately offers no affordance implying otherwise.
+ *
+ * Signing is on this page and the key is not, which is the distinction worth keeping straight. The
+ * signature that lets an enrolling host apply a template is made by `hostseal signer` on the
+ * operator's own machine, against a body printed in that machine's terminal and confirmed by a human
+ * there; what this page does is ask for one and store what comes back. Neither the browser nor the
+ * control plane ever holds the key, and a control plane that served a malicious version of this
+ * application still could not get a signature over a template whose text nobody read.
  *
  * Within that line a full editor is fine, and this is one: storing a template authorises nothing on
  * any machine. Two properties of the storage model surface directly in the UI. Every save is a new
@@ -57,6 +71,12 @@ const TOKEN_PLACEHOLDER = 'enrollmentToken';
 export class TemplatesPage {
   /** Talks to the control plane. */
   private readonly api = inject(ApiService);
+
+  /**
+   * Talks to the signer on the operator's own machine, which is the one thing on this page that the
+   * control plane does not run and cannot reach.
+   */
+  private readonly localSigner = inject(LocalSignerService);
 
   /**
    * The placeholder syntax, as a field rather than as literal text in the template.
@@ -122,6 +142,45 @@ export class TemplatesPage {
   /** Whether a write is in flight. */
   protected readonly busy = signal(false);
 
+  /** Where a HostSeal signer listens, for the message that tells an operator to start one. */
+  protected readonly signerUrl = LOCAL_SIGNER_URL;
+
+  /**
+   * The address this page was served from, which is what a signer has to be told to sign for.
+   *
+   * Read once and held, so the instructions this page prints are the ones that will actually work: a
+   * signer started with any other --origin refuses every request from here, and the difference is
+   * invisible in both places it is written down.
+   */
+  protected readonly origin = typeof location === 'undefined' ? '' : location.origin;
+
+  /** The local signer that answered, null when none has been found in this session. */
+  protected readonly signerStatus = signal<LocalSignerStatus | null>(null);
+
+  /** Why the local signer could not be reached or would not sign, empty when it did. */
+  protected readonly signerError = signal('');
+
+  /**
+   * Which of the two signing buttons the page is currently busy on behalf of.
+   *
+   * The page has one signer and two places to ask it from — the editor, and the version pane — and
+   * what it has to say while waiting is several lines long. Rendering that under both would show the
+   * same paragraph twice; rendering it under neither in particular would leave an operator looking
+   * for the button they just pressed. Set when the interaction starts, so the progress bar and the
+   * message that follows it land in the same place.
+   */
+  protected readonly signerWhere = signal<'' | 'editor' | 'version'>('');
+
+  /**
+   * What the signer is doing: looking for it, or waiting for a human and a token.
+   *
+   * It is a state rather than a boolean because the two mean different things to somebody watching:
+   * "finding" is over in milliseconds, and "waiting" is a request that will sit there until they walk
+   * to their machine, read a template and touch a key. A spinner with no sentence beside it would
+   * look like a page that has hung.
+   */
+  protected readonly signerState = signal<'' | 'finding' | 'waiting'>('');
+
   /** The name typed in the editor. */
   protected readonly draftName = signal('');
 
@@ -160,6 +219,9 @@ export class TemplatesPage {
   protected readonly canSave = computed(
     () => !this.busy() && this.draftName().trim().length > 0 && this.draftBody().trim().length > 0,
   );
+
+  /** Whether anything at all may be asked of the signer right now. */
+  protected readonly canSign = computed(() => this.signerState() === '' && !this.busy());
 
   /** Loads the template list. */
   constructor() {
@@ -282,6 +344,22 @@ export class TemplatesPage {
     return `${at.toISOString().slice(0, 16).replace('T', ' ')} UTC`;
   }
 
+  /**
+   * Renders who signed a version and with what.
+   *
+   * Both halves, because both are what a host checks: a `trusted-signers` line carries an algorithm
+   * beside the key id, and a version signed by the right person under the other algorithm is refused
+   * at enrolment. A key id with no algorithm beside it leaves an operator comparing half a line
+   * against a machine they cannot see.
+   *
+   * A method rather than braces in the markup, because the alternative was an inline conditional
+   * inside a sentence, which reads as punctuation until somebody looks closely.
+   */
+  protected signedBy(record: TemplateSummary | TemplateVersion | TemplateRevision): string {
+    const key = record.signerKeyId || 'an unnamed key';
+    return record.signerAlgorithm ? `${key} (${record.signerAlgorithm})` : key;
+  }
+
   /** Loads the open template's body into the editor, as the starting point for its next version. */
   protected editOpen(): void {
     const record = this.opened();
@@ -293,33 +371,135 @@ export class TemplatesPage {
   }
 
   /**
-   * Stores the editor's contents as the next version.
+   * Stores the editor's contents as the next version, unsigned.
    *
-   * Unsigned: a signature is made offline by `hostseal sign-template`, with a key this control plane
-   * does not hold, and a browser is the last place that key should ever be. An unsigned template can
-   * be rendered and pasted into a provisioner, which is what this page is for; only a signed one may
-   * be handed to an enrolling agent, because the agent verifies it against its own trusted-signers.
+   * Unsigned is a complete answer for most of what this page is for: a template that will be rendered
+   * and pasted into a provisioner needs no signature at all. Only a bootstrap handed to an enrolling
+   * agent does, because the agent verifies it against its own trusted-signers — and that signature is
+   * made by a key on the operator's own machine, never here. "Sign and save" beside this button is
+   * that, done in one step; the key still never reaches the browser or the control plane.
    */
   protected save(): void {
+    this.store({ name: this.draftName().trim(), body: this.draftBody() });
+  }
+
+  /**
+   * Stores one version, signed or not, and opens what was stored.
+   *
+   * One method for both paths so that an unsigned save and a signed one cannot drift apart in what
+   * they do afterwards — the re-read below is the part that matters, and it is exactly as necessary
+   * for a signed version as for an unsigned one.
+   */
+  private store(request: CreateTemplateRequest): void {
     this.busy.set(true);
     this.actionError.set('');
-    this.api
-      .createTemplate({ name: this.draftName().trim(), body: this.draftBody() })
-      .subscribe({
-        next: (stored) => {
-          this.busy.set(false);
-          this.reload();
-          // Re-read rather than opening the create response. That response confirms what was stored
-          // and does not echo the body, so trusting it would leave the pane blank and the editor
-          // holding nothing to start the next version from. Re-reading is also the only way to be
-          // looking at what the control plane holds rather than at what this page sent.
-          this.open(stored.name, stored.version);
-        },
-        error: (err: unknown) => {
-          this.busy.set(false);
-          this.actionError.set(describeError(err));
-        },
-      });
+    this.api.createTemplate(request).subscribe({
+      next: (stored) => {
+        this.busy.set(false);
+        this.reload();
+        // Re-read rather than opening the create response. That response confirms what was stored
+        // and does not echo the body, so trusting it would leave the pane blank and the editor
+        // holding nothing to start the next version from. Re-reading is also the only way to be
+        // looking at what the control plane holds rather than at what this page sent.
+        this.open(stored.name, stored.version);
+      },
+      error: (err: unknown) => {
+        this.busy.set(false);
+        this.actionError.set(describeError(err));
+      },
+    });
+  }
+
+  /**
+   * Looks for a signer on this machine, and remembers what it says.
+   *
+   * Asked for rather than probed on load: a page that reached a loopback port unprompted would put a
+   * failed request in the console of every operator who does not sign from a browser, which is how
+   * people learn to ignore console errors. It is also the step that answers the question an operator
+   * has before they sign anything — which key is about to be used, and what line a host needs in its
+   * own trusted-signers for that key to mean anything.
+   */
+  protected findSigner(): void {
+    this.signerError.set('');
+    this.signerWhere.set('version');
+    this.signerState.set('finding');
+    this.localSigner.status().subscribe({
+      next: (status) => {
+        this.signerState.set('');
+        this.signerStatus.set(status);
+      },
+      error: (err: unknown) => {
+        this.signerState.set('');
+        this.signerStatus.set(null);
+        this.signerError.set(describeSignerError(err, this.origin));
+      },
+    });
+  }
+
+  /** Signs the open version's bytes, storing the result as the template's next version. */
+  protected signOpen(): void {
+    const record = this.opened();
+    if (!record) {
+      return;
+    }
+    this.signAndStore(record.name, record.body, 'version');
+  }
+
+  /** Signs what is in the editor, storing it as the next version in one step. */
+  protected signDraft(): void {
+    this.signAndStore(this.draftName().trim(), this.draftBody(), 'editor');
+  }
+
+  /**
+   * Asks the local signer for a signature over a template, then stores it as a new version.
+   *
+   * The name and the body go to the signer and come back with a signature over the two of them
+   * together — the same canonical {name, body} document `hostseal sign-template` signs and an
+   * enrolling agent verifies. Signing the body alone would let a compromised control plane hand a host
+   * a genuinely signed template under a name the operator never asked for, which is why the signature
+   * covers both and why this page sends both.
+   *
+   * The echoed name is checked before anything is stored. It costs a comparison and it closes the one
+   * gap this page could otherwise have: a signature is only about the template it was made for, and
+   * storing one against another name would produce a version that looks signed here and is refused by
+   * every host, for a reason nothing on this page could explain.
+   *
+   * Nothing is stored when the signer refuses. A declined confirmation is an operator saying no at the
+   * machine holding the key, and the right response to that is to leave the control plane exactly as
+   * it was.
+   */
+  private signAndStore(name: string, body: string, where: 'editor' | 'version'): void {
+    if (!name || !body) {
+      return;
+    }
+    this.signerError.set('');
+    this.signerWhere.set(where);
+    this.actionError.set('');
+    this.signerState.set('waiting');
+
+    this.localSigner.signTemplate(name, body).subscribe({
+      next: (signed) => {
+        this.signerState.set('');
+        if (signed.name !== name) {
+          this.signerError.set(
+            `The signer returned a signature for "${signed.name}" and this page asked about ` +
+              `"${name}". Nothing was stored: a signature is only about the template it was made for.`,
+          );
+          return;
+        }
+        this.store({
+          name,
+          body,
+          signature: signed.signature,
+          signerKeyId: signed.signerKeyId,
+          signerAlgorithm: signed.signerAlgorithm,
+        });
+      },
+      error: (err: unknown) => {
+        this.signerState.set('');
+        this.signerError.set(describeSignerError(err, this.origin));
+      },
+    });
   }
 
   /** Records one placeholder's value. */
