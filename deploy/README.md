@@ -78,12 +78,10 @@ password through psql variables, where every character is legal — so without t
 disagree, and the symptom is a control plane that cannot connect using the password the database
 accepted. A password inside an explicit `HOSTSEAL_DATABASE_URL` still wins, as libpq specifies.
 
-**The CA directory is a volume, and it is not the database.** `hostseal-state` holds three things: the
-CA that issues agent certificates, the key that signs routine jobs, and the key that encrypts
-provisioning template bodies at rest. None of them is in PostgreSQL, which is what makes a database dump
-neither a way to impersonate a host nor a set of provisioning scripts. Back it up separately from the
-database, and restore both — a database restored without `template.key` leaves every stored template
-permanently unopenable, and the control plane says so rather than pretending they are corrupt.
+**The CA directory is a volume, and it is not the database.** `hostseal-state` holds two things: the
+CA that issues agent certificates and the key that signs routine jobs. Neither is in PostgreSQL, which
+is what makes a database dump not a way to impersonate a host. Back it up separately from the
+database, and restore both.
 
 **The container's uid is pinned at 65532.** A volume keeps the ownership it was created with, so a uid
 that drifted between image releases would leave a running installation unable to read its own CA.
@@ -187,7 +185,7 @@ docker compose -f compose.yaml -f compose.traefik.yaml -f compose.traefik-ui.yam
 ```
 
 **Copy `ca.crt`; do not mount the `hostseal-state` volume into Traefik.** That volume also holds
-`ca.key`, the key that signs routine jobs and the key that seals template bodies. A proxy that could
+`ca.key` and the key that signs routine jobs. A proxy that could
 read `ca.key` could issue client certificates and impersonate any host to this control plane —
 [`../docs/SECURITY.md`](../docs/SECURITY.md) names the CA key and the database as exactly the pair that
 buys that. `ca.crt` is a public document and is the whole of what Traefik needs.

@@ -771,203 +771,6 @@ export interface AlertRuleRequest {
   enabled?: boolean;
 }
 
-/** One provisioning template, as the list renders it. */
-export interface TemplateSummary {
-  /** The template's name, which is what an enrolment token names to request it. */
-  name: string;
-
-  /** The highest version stored. Every save is a new version; there is no update path. */
-  latestVersion: number;
-
-  /** When the latest version was stored. */
-  createdAt: string;
-
-  /** Which operator stored it. */
-  createdBy: string;
-
-  /**
-   * Whether the latest version carries an offline signature.
-   *
-   * An unsigned template can be rendered and pasted into a provisioner; only a signed one may be
-   * handed to an enrolling agent, because the agent verifies it against its own trusted-signers and
-   * this control plane cannot produce that signature.
-   */
-  signed: boolean;
-
-  /** The key that signed the latest version, absent when it is unsigned. */
-  signerKeyId?: string;
-
-  /** That signature's algorithm, absent when the latest version is unsigned. */
-  signerAlgorithm?: string;
-
-  /**
-   * Whether the name has been withdrawn from use.
-   *
-   * There is no delete: a host's bootstrap record names a version and has to resolve to the bytes
-   * that ran, so retiring a template withdraws the *name* — out of this listing, refused for new
-   * versions, renders, tokens and enrolments — while every version stays readable. Restoring undoes
-   * exactly that and nothing else.
-   */
-  archived: boolean;
-
-  /** When it was withdrawn, absent while it is live. */
-  archivedAt?: string;
-
-  /** Which operator withdrew it, absent while it is live. */
-  archivedBy?: string;
-}
-
-/** The response of `GET /api/v1/templates`. */
-export interface TemplatesResponse {
-  /** One summary per template, newest first. */
-  templates: TemplateSummary[];
-}
-
-/** One immutable version of a template, body included. */
-export interface TemplateVersion {
-  /** The template's name. */
-  name: string;
-
-  /** This version's number. */
-  version: number;
-
-  /** The cloud-config body, verbatim. */
-  body: string;
-
-  /** Whether an offline signature is attached. */
-  signed: boolean;
-
-  /** The key that signed it, absent for an unsigned version. */
-  signerKeyId?: string;
-
-  /**
-   * The algorithm that signature was made with, absent for an unsigned version.
-   *
-   * Shown beside the key id rather than instead of it, because the pair is what a `trusted-signers`
-   * line carries: a version signed by the right person with a key the host lists under the other
-   * algorithm is refused at enrolment, and the page an operator is looking at should be able to say
-   * so rather than leave them comparing one half of a line.
-   */
-  signerAlgorithm?: string;
-
-  /** When it was stored. */
-  createdAt: string;
-
-  /** Which operator stored it. */
-  createdBy: string;
-
-  /** The placeholder names the body substitutes, so a render form can be built without parsing it. */
-  placeholders: string[];
-
-  /**
-   * Secret shapes found in the body, with the consequence spelled out.
-   *
-   * Warnings and never refusals: user-data is readable from inside the instance and from the metadata
-   * service, so a secret in a template is a secret in plaintext on every host it provisions — and a
-   * control that blocked the save would only teach operators to route around it.
-   */
-  warnings: string[];
-
-  /**
-   * Whether the template's name has been withdrawn from use.
-   *
-   * Reported on a version because reading one is never refused — resolving a host's bootstrap record
-   * is the whole reason archiving is not a delete — so the pane showing the body is where a reader
-   * has to be told which of the two states they are looking at.
-   */
-  archived: boolean;
-
-  /** When it was withdrawn, absent while it is live. */
-  archivedAt?: string;
-
-  /** Which operator withdrew it, absent while it is live. */
-  archivedBy?: string;
-}
-
-/** What an archive or restore answers with. */
-export interface TemplateArchivalResult {
-  /** The template acted on. */
-  name: string;
-
-  /** Its state afterwards: true after an archive, false after a restore. */
-  archived: boolean;
-
-  /** When it was withdrawn, absent after a restore. */
-  archivedAt?: string;
-
-  /** Which operator withdrew it, absent after a restore. */
-  archivedBy?: string;
-}
-
-/**
- * What a save answers with.
- *
- * Narrower than `TemplateVersion` on purpose, and the narrowness is the server's rather than this
- * file's: the create response confirms what was stored and deliberately does not echo the body back,
- * because a body is where operators put the things the warnings are about. A client that wants the
- * whole version reads it, which is also the only way to be sure it is looking at what was stored
- * rather than at what it sent.
- */
-export interface StoredTemplateVersion {
-  /** The template's name. */
-  name: string;
-
-  /** The version just written. */
-  version: number;
-
-  /** Whether it carries an offline signature. */
-  signed: boolean;
-
-  /** The key that signed it, absent when it was stored unsigned. */
-  signerKeyId?: string;
-
-  /** That signature's algorithm, absent when it was stored unsigned. */
-  signerAlgorithm?: string;
-
-  /** The placeholder names the body substitutes. */
-  placeholders: string[];
-
-  /** Secret shapes found in the body, with the consequence spelled out. */
-  warnings: string[];
-}
-
-/**
- * One stored revision as the version listing renders it, without its body.
- *
- * No body, because the listing is about the shape of a template's history rather than its contents:
- * bodies are sealed, potentially large, and the one a caller actually wants is fetched by naming its
- * version — which is also the request that is marked non-cacheable, because that is the one carrying
- * something worth keeping out of a cache.
- */
-export interface TemplateRevision {
-  /** This revision's number. */
-  version: number;
-
-  /** Whether it carries an offline signature, and so may be issued to an enrolling host. */
-  signed: boolean;
-
-  /** The key that signed it, absent for an unsigned revision. */
-  signerKeyId?: string;
-
-  /** That signature's algorithm, absent for an unsigned revision. */
-  signerAlgorithm?: string;
-
-  /** When it was stored. */
-  createdAt: string;
-
-  /** Which operator stored it. */
-  createdBy: string;
-}
-
-/** The response of `GET /api/v1/templates/{name}/versions`. */
-export interface TemplateVersionsResponse {
-  /** The template these revisions belong to. */
-  name: string;
-
-  /** Every stored revision, newest first. */
-  versions: TemplateRevision[];
-}
-
 /**
  * A signed job, exactly as `POST /api/v1/jobs` takes it.
  *
@@ -1005,71 +808,6 @@ export interface SignedJob {
 
   /** The algorithm it was made with. */
   signerAlgorithm: string;
-}
-
-/** The body of `POST /api/v1/templates`. */
-export interface CreateTemplateRequest {
-  /** The template's name; an existing name stores the next version of it. */
-  name: string;
-
-  /** The cloud-config body. */
-  body: string;
-
-  /** A detached signature made offline by `hostseal sign-template`, absent for an unsigned version. */
-  signature?: string;
-
-  /** The signing key's identity, required with a signature. */
-  signerKeyId?: string;
-
-  /** The signature algorithm, required with a signature. */
-  signerAlgorithm?: string;
-}
-
-/** The body of `POST /api/v1/templates/{name}/render`. */
-export interface RenderTemplateRequest {
-  /** Which version to render, omitted for the latest. */
-  version?: number;
-
-  /** The values substituted into the template's placeholders. */
-  params: Record<string, string>;
-
-  /** How to configure the enrolment token, when the body substitutes one. */
-  token?: {
-    /** A human-readable name for the token, defaulted to naming the template. */
-    label?: string;
-    /** The fleet group hosts enrolled with it join. */
-    group?: string;
-    /** The token's lifetime, defaulted to the server's. */
-    ttlSeconds?: number;
-    /** The template this token may request at enrolment, which is how a Tier 2 bootstrap is armed. */
-    bootstrap?: string;
-  };
-}
-
-/**
- * The response of a render.
- *
- * It is a credential and is treated as one: nothing stores it, it is not cacheable, and an operator
- * who loses it renders again — which mints a fresh token and costs nothing.
- */
-export interface RenderedTemplate {
-  /** The template rendered. */
-  name: string;
-
-  /** The version rendered. */
-  version: number;
-
-  /** The user-data, ready to paste into a provisioner. */
-  userData: string;
-
-  /** Secret shapes found in the *rendered* output, which includes what substitution introduced. */
-  warnings: string[];
-
-  /** When the minted enrolment token expires, absent when the template mints none. */
-  tokenExpiresAt?: string | null;
-
-  /** The control plane's own sentence about the output being shown once. */
-  note: string;
 }
 
 /** The signed-in account, as `GET /api/v1/account` describes it. */
@@ -1273,9 +1011,6 @@ export interface MintedEnrolmentToken {
 
   /** When it stops being usable. */
   expiresAt: string;
-
-  /** The provisioning template this token arms, absent for a plain enrolment. */
-  bootstrap?: string;
 }
 
 /**
@@ -1308,9 +1043,6 @@ export interface EnrolmentTokenSummary {
 
   /** Whether it could still be redeemed: unused and not yet expired. */
   usable: boolean;
-
-  /** The provisioning template it arms, absent for a plain token. */
-  bootstrap?: string;
 }
 
 /** The response of `GET /api/v1/tokens`. */
@@ -1322,12 +1054,9 @@ export interface EnrolmentTokensResponse {
 /**
  * The body of `POST /api/v1/tokens`, as the enrolment panel sends it.
  *
- * Everything the server takes. The bootstrap is here because the panel is where a host is added, and
- * a host provisioned from a template is added with a token that names it — minted by an authenticated
- * operator, in advance, which is what keeps the choice of template out of the hands of whoever holds
- * the token. The lifetime is here because a token is a standing invitation until it is spent or
- * expires, and a day is the wrong answer both for a machine being built this minute and for one
- * arriving next week.
+ * Everything the server takes. The lifetime is here because a token is a standing invitation until it
+ * is spent or expires, and a day is the wrong answer both for a machine being built this minute and
+ * for one arriving next week.
  */
 export interface CreateEnrolmentTokenRequest {
   /** A human-readable name, so the token list says what each one was for. */
@@ -1338,15 +1067,6 @@ export interface CreateEnrolmentTokenRequest {
 
   /** How long the token stays redeemable, in seconds; omitted for the control plane's default. */
   ttlSeconds?: number;
-
-  /**
-   * The provisioning template this token may request at enrolment, omitted for none.
-   *
-   * The control plane refuses a name whose latest version is unsigned or archived, so the panel
-   * offers only the templates it would accept — but the refusal is the server's, and the host's own
-   * trusted-signers file is where the decision actually lives.
-   */
-  bootstrap?: string;
 }
 
 /**

@@ -17,8 +17,7 @@ convention:
 > still cannot run arbitrary code on any **enrolled** host, cannot exceed any host's local policy, and
 > cannot reboot or stop services on hosts whose policy forbids it.
 
-Both paragraphs of it ship together — the second names the enrolment-time exception — and the
-`guarantee` workflow fails if either goes missing from either file.
+The `guarantee` workflow fails if it goes missing from either file, or is changed by a word.
 
 ## Commands
 
@@ -119,7 +118,11 @@ conversation, not a commit.
 - **Approval is a per-tenant setting, and it is stamped on the job row at creation.** `none`, `self` or
   `second_person`; new tenants get `none`. It is never re-derived at approval time — that would let
   somebody queue a job under the two-person rule, relax the setting and release it themselves.
-- **Tier 3 — pushing configuration to an already-enrolled host — is never built.**
+- **HostSeal does not provision hosts, and never will.** There is no template store, no cloud-init
+  integration and no configuration push: what a machine looks like on its first boot is decided by
+  whatever built it, and once enrolled a host can only be asked for a catalogue member. Pushing
+  configuration to an enrolled host — Tier 3 — is the single capability that would leave the guarantee
+  unstateable, and there is no lesser tier of it either.
 
 ## Architecture
 

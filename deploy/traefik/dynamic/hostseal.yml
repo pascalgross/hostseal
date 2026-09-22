@@ -22,7 +22,7 @@ http:
       # HostSeal's CA certificate, so this transport trusts exactly one issuer for this one service. It
       # is a *certificate*, not the CA directory: `docker compose cp` it out as deploy/README.md
       # describes, and do not mount the hostseal-state volume into Traefik. That volume also holds
-      # ca.key, the key that signs routine jobs and the key that seals template bodies; a proxy that
+      # ca.key and the key that signs routine jobs; a proxy that
       # could read ca.key could mint client certificates and impersonate any host to this control
       # plane. ca.crt is a public document and this is the whole of what Traefik needs.
       rootCAs:

@@ -11,7 +11,6 @@ import {
   ChangePasswordRequest,
   CreateApiTokenRequest,
   CreateReadJobRequest,
-  CreateTemplateRequest,
   CreateEnrolmentTokenRequest,
   EnrolmentTokensResponse,
   CreateTenantRequest,
@@ -25,19 +24,12 @@ import {
   IssuedApiToken,
   Job,
   JobsResponse,
-  RenderTemplateRequest,
-  RenderedTemplate,
   ServiceHistoryResponse,
   SessionsResponse,
   SessionsRevoked,
   SignInRequest,
   SignedIn,
   SignedJob,
-  StoredTemplateVersion,
-  TemplateArchivalResult,
-  TemplateVersion,
-  TemplateVersionsResponse,
-  TemplatesResponse,
   MintedEnrolmentToken,
   Tenant,
   TenantsResponse,
@@ -435,101 +427,6 @@ export class ApiService {
   /** Deletes a rule and the firing state it accumulated. */
   deleteAlertRule(id: string): Observable<unknown> {
     return this.http.delete(`/api/v1/alerts/${encodeURIComponent(id)}`, { headers: this.headers() });
-  }
-
-  /**
-   * Fetches one summary per provisioning template.
-   *
-   * Archived templates are left out unless asked for. Hidden by default because that is what
-   * retiring one was for; askable because a name nobody can list is a name nobody can restore.
-   */
-  templates(includeArchived = false): Observable<TemplatesResponse> {
-    const query = includeArchived ? '?include=archived' : '';
-    return this.http.get<TemplatesResponse>(`/api/v1/templates${query}`, {
-      headers: this.headers(),
-    });
-  }
-
-  /**
-   * Withdraws a template name from use, leaving every stored version readable.
-   *
-   * This is the page's delete button, and the difference from a delete is the reason it can exist at
-   * all: nothing is destroyed, so a host's bootstrap record still resolves to the bytes that ran.
-   * What changes is what the name may still be used for — new versions, renders, enrolment tokens
-   * and enrolments are refused until it is restored.
-   */
-  archiveTemplate(name: string): Observable<TemplateArchivalResult> {
-    return this.http.post<TemplateArchivalResult>(
-      `/api/v1/templates/${encodeURIComponent(name)}/archive`,
-      {},
-      { headers: this.headers() },
-    );
-  }
-
-  /**
-   * Puts an archived template name back into use.
-   *
-   * It grants nothing the name did not already have: a restored template is issuable at enrolment
-   * only under the conditions that governed it before, signature included.
-   */
-  restoreTemplate(name: string): Observable<TemplateArchivalResult> {
-    return this.http.post<TemplateArchivalResult>(
-      `/api/v1/templates/${encodeURIComponent(name)}/restore`,
-      {},
-      { headers: this.headers() },
-    );
-  }
-
-  /** Fetches one version of a template in full, defaulting to the latest. */
-  template(name: string, version?: number): Observable<TemplateVersion> {
-    const query = version ? `?version=${version}` : '';
-    return this.http.get<TemplateVersion>(
-      `/api/v1/templates/${encodeURIComponent(name)}${query}`,
-      { headers: this.headers() },
-    );
-  }
-
-  /**
-   * Fetches every stored revision of one template, newest first.
-   *
-   * Separate from reading a version because the two differ in what they carry: this one is a history
-   * with no bodies in it, which is what lets a page show that version 3 exists and who stored it
-   * without pulling three sealed documents a reader did not ask for.
-   */
-  templateVersions(name: string): Observable<TemplateVersionsResponse> {
-    return this.http.get<TemplateVersionsResponse>(
-      `/api/v1/templates/${encodeURIComponent(name)}/versions`,
-      { headers: this.headers() },
-    );
-  }
-
-  /**
-   * Stores the next version of a template.
-   *
-   * There is no update method and no delete, which is the storage model rather than an omission: a
-   * host's bootstrap record names a version and must resolve to the bytes that actually ran. What a
-   * retirement looks like instead is `archiveTemplate` above.
-   */
-  createTemplate(request: CreateTemplateRequest): Observable<StoredTemplateVersion> {
-    return this.http.post<StoredTemplateVersion>('/api/v1/templates', request, {
-      headers: this.headers(),
-    });
-  }
-
-  /**
-   * Renders a template to user-data.
-   *
-   * The response is a credential — it usually carries a freshly minted enrolment token — so it is
-   * shown once and nothing stores it, here or on the server. There is deliberately no method that
-   * would *deliver* the result to a host: HostSeal is not in the delivery path, and a control that
-   * implied otherwise would be Tier 3, which is never built.
-   */
-  renderTemplate(name: string, request: RenderTemplateRequest): Observable<RenderedTemplate> {
-    return this.http.post<RenderedTemplate>(
-      `/api/v1/templates/${encodeURIComponent(name)}/render`,
-      request,
-      { headers: this.headers() },
-    );
   }
 
   /**

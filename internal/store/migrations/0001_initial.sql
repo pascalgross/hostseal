@@ -16,7 +16,6 @@ CREATE TABLE IF NOT EXISTS enrollment_tokens (
     hash             text PRIMARY KEY,
     label            text        NOT NULL DEFAULT '',
     fleet_group      text        NOT NULL DEFAULT '',
-    bootstrap        text        NOT NULL DEFAULT '',
     created_at       timestamptz NOT NULL,
     expires_at       timestamptz NOT NULL,
     consumed_at      timestamptz,

@@ -38,7 +38,6 @@ func TestGuaranteeThePlatformCredentialReachesNoTenantsData(t *testing.T) {
 		{http.MethodGet, "/api/v1/events"},
 		{http.MethodGet, "/api/v1/services/failed"},
 		{http.MethodGet, "/api/v1/alerts"},
-		{http.MethodGet, "/api/v1/templates"},
 	} {
 		t.Run(c.method+" "+c.path, func(t *testing.T) {
 			status, body := h.adminJSON(t, h.platformToken, c.method, c.path, map[string]any{})

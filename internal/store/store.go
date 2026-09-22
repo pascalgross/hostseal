@@ -69,9 +69,6 @@ type EnrollmentToken struct {
 	// Group is the fleet group hosts enrolled with this token join.
 	Group string
 
-	// Bootstrap names a provisioning template this token may request, empty for none.
-	Bootstrap string
-
 	// CreatedAt is when it was issued.
 	CreatedAt time.Time
 
@@ -387,169 +384,6 @@ type AlertState struct {
 
 	// LastNotified is when this pair last produced a notification, zero for never.
 	LastNotified time.Time
-}
-
-// TemplateVersion is one immutable version of a provisioning template.
-//
-// A version, not a document: the row is written once and never updated, because Tier 2 records "this
-// host was bootstrapped with standard-server v3" and that record is worthless if the row it names can
-// be edited afterwards. Superseding a template means creating the next version, and every version
-// stays readable for as long as a host's bootstrap record can name it.
-type TemplateVersion struct {
-	// Name is the identifier an operator types, shared by every version of one template.
-	Name string
-
-	// Version numbers this revision, starting at 1. Assigned by the store, never by the caller.
-	Version int
-
-	// BodySealed is the cloud-init user-data, encrypted at rest by internal/seal.
-	//
-	// The store holds ciphertext and only ciphertext, so that a database dump does not yield the
-	// enrolment tokens and break-glass credentials operators put into template bodies. The key lives
-	// beside the CA, outside the database, which is what makes the encryption mean something against
-	// the backup-shaped threat docs/SECURITY.md §7 names.
-	BodySealed []byte
-
-	// Signature is a detached signature over the canonical {name, body} payload, base64, empty for an
-	// unsigned version.
-	//
-	// It is produced offline by `hostseal sign-template`, with a key this control plane does not hold,
-	// and is stored and handed over verbatim. An unsigned version can be rendered for Terraform; only a
-	// signed one can be issued to an enrolling host, because the agent verifies it against the host's
-	// own trusted-signers and a control plane cannot make that check pass.
-	Signature string
-
-	// SignerKeyID names the key that signed it, empty for an unsigned version.
-	SignerKeyID string
-
-	// SignerAlgorithm is "ed25519" or "ecdsa-p256", empty for an unsigned version.
-	SignerAlgorithm string
-
-	// CreatedAt is when this version was stored.
-	CreatedAt time.Time
-
-	// CreatedBy is the operator who stored it, for the audit trail.
-	CreatedBy string
-}
-
-// Signed reports whether this version carries an offline signature.
-//
-// It is a method rather than three comparisons at each site so that "signed" means the same thing on
-// the enrolment path, in the listing and in the UI — the site that checked only Signature would treat
-// a version with a signature and no named key as issuable, and the record on the host would then name
-// nobody.
-func (t TemplateVersion) Signed() bool {
-	return t.Signature != "" && t.SignerKeyID != "" && t.SignerAlgorithm != ""
-}
-
-// TemplateSummary is one template name as a listing renders it.
-//
-// A summary rather than the version rows, because the listing is read on every load of the templates
-// page and the bodies are both sealed and potentially large; a client that wants a body names a
-// version and asks for it.
-type TemplateSummary struct {
-	// Name is the template's identifier.
-	Name string
-
-	// LatestVersion is the highest version stored under this name.
-	LatestVersion int
-
-	// CreatedAt is when the latest version was stored.
-	CreatedAt time.Time
-
-	// CreatedBy is who stored the latest version.
-	CreatedBy string
-
-	// Signed reports whether the latest version carries an offline signature, which is what decides
-	// whether an enrolling host can be issued this template at all.
-	Signed bool
-
-	// SignerKeyID names the key that signed the latest version, empty when it is unsigned.
-	SignerKeyID string
-
-	// SignerAlgorithm is that signature's algorithm, empty when the version is unsigned.
-	//
-	// It travels with the key id everywhere the key id does, because the two answer one question
-	// between them: "ops-yubikey-1" says whose key and "ecdsa-p256" says which of the two wire
-	// algorithms a host will have to have in its trusted-signers line for that key. An operator
-	// pasting that line needs both, and a listing that showed only the first would send them to look
-	// the second up somewhere it is not written down.
-	SignerAlgorithm string
-
-	// Archived reports whether the name has been withdrawn from use.
-	//
-	// On the summary rather than only in a separate lookup because the listing is where an operator
-	// decides what to open: a withdrawn template that looked exactly like a live one would be edited,
-	// rendered and wondered about before anything said it had been retired.
-	Archived bool
-
-	// ArchivedAt is when the name was withdrawn, zero when it is live.
-	ArchivedAt time.Time
-
-	// ArchivedBy is the operator who withdrew it, empty when it is live.
-	ArchivedBy string
-}
-
-// TemplateRevision is one stored version of a template, without its body.
-//
-// It exists because "every save is a new immutable version" is a property an operator has to be able to
-// *see*: a host's bootstrap record names a version, and a version nobody can enumerate is one nobody
-// can resolve back to what ran. The body is deliberately absent — it is sealed, it is potentially
-// large, and a listing that carried every revision's body would decrypt a template's whole history to
-// answer "which versions are there".
-type TemplateRevision struct {
-	// Version is this revision's number, starting at 1.
-	Version int
-
-	// CreatedAt is when it was stored.
-	CreatedAt time.Time
-
-	// CreatedBy is who stored it.
-	CreatedBy string
-
-	// Signed reports whether this revision carries an offline signature, which is what decides whether
-	// an enrolling host can be issued it at all.
-	Signed bool
-
-	// SignerKeyID names the key that signed it, empty when unsigned.
-	SignerKeyID string
-
-	// SignerAlgorithm is the signature's algorithm, empty when unsigned.
-	SignerAlgorithm string
-}
-
-// TemplateArchival records that a template name has been withdrawn from use.
-//
-// It is the answer to "delete this template", which this store deliberately cannot do. A version is
-// immutable and permanent because a host's Tier 2 bootstrap record names one and has to resolve to the
-// bytes that actually ran — so what an operator retiring a template can be given is everything they
-// meant by deleting it except the destruction of that evidence: the name leaves the listing, refuses
-// new versions, cannot be named by a new enrolment token, cannot be rendered, and is refused at
-// enrolment.
-//
-// A record about the name, never a column on a version, which is why it is its own type: the templates
-// rows stay written-once, and archiving touches none of them.
-type TemplateArchival struct {
-	// Name is the template that was withdrawn.
-	Name string
-
-	// ArchivedAt is when it was withdrawn. Zero means the name is live, which is what the store
-	// returns for a template nobody has archived — the absence of a record is the ordinary state, not
-	// an error.
-	ArchivedAt time.Time
-
-	// ArchivedBy is the operator who withdrew it, for the audit trail. It is the answer to the
-	// question an operator asks when an enrolment is refused for a template they did not retire.
-	ArchivedBy string
-}
-
-// Archived reports whether this record describes a withdrawn name.
-//
-// A method rather than a comparison at each site, for the reason TemplateVersion.Signed is one: half a
-// dozen call sites decide whether to refuse based on this, and "archived" has to mean the same thing at
-// the enrolment path as it does in the listing.
-func (a TemplateArchival) Archived() bool {
-	return !a.ArchivedAt.IsZero()
 }
 
 // Online reports whether the host has been heard from recently enough to be considered up.
@@ -1323,15 +1157,6 @@ type Scoped interface {
 	// ListEnrollmentTokens returns this tenant's tokens for the UI, newest first.
 	ListEnrollmentTokens(ctx context.Context) ([]EnrollmentToken, error)
 
-	// GetEnrollmentToken returns one token by hash without consuming it, or ErrTokenUnusable.
-	//
-	// It exists for the one read enrolment must make between resolving a token and redeeming it:
-	// whether the token authorises the bootstrap template the agent asked for. That check has to come
-	// before consumption — a refusal that burnt the token would leave the operator retrying with a
-	// credential that now really is unusable, which reads exactly like the token having been stolen.
-	// Unknown, expired and consumed are one error here for the same reason they are everywhere else.
-	GetEnrollmentToken(ctx context.Context, hash string) (EnrollmentToken, error)
-
 	// CreateEnrolledHost records a newly enrolled host and its first certificate together, if the
 	// fleet's host limit leaves room. It answers ErrHostLimitReached when it does not.
 	//
@@ -1490,67 +1315,6 @@ type Scoped interface {
 	// another host's job, and because recording is idempotent the forged result would then suppress the
 	// real one when it arrived.
 	RecordResult(ctx context.Context, hostID string, r protocol.ResultRequest) (bool, error)
-
-	// CreateTemplateVersion stores the next version of a template and returns the number it was given.
-	//
-	// The version is assigned here, atomically against concurrent writers, rather than chosen by the
-	// caller: two operators saving at once must produce v3 and v4, never two rows both claiming v3 and
-	// never a lost update. There is deliberately no method that updates a stored body — a version is
-	// immutable because the Tier 2 bootstrap record on a host names one, and a record that resolves to
-	// bytes that can change afterwards is not a record.
-	CreateTemplateVersion(ctx context.Context, t TemplateVersion) (int, error)
-
-	// ListTemplates returns one summary per template name, newest latest-version first.
-	//
-	// Archived names are left out unless includeArchived says otherwise. The default is the one an
-	// operator wants on a page they read every day; the flag is what makes the omission honest, because
-	// a retired template that could not be listed again could not be restored either.
-	ListTemplates(ctx context.Context, includeArchived bool) ([]TemplateSummary, error)
-
-	// ArchiveTemplate withdraws a template name from use, leaving every stored version intact.
-	//
-	// This is as close to deleting a template as this store comes, and the distance is the point.
-	// Nothing is destroyed: the versions stay readable, so a host's bootstrap record still resolves to
-	// the bytes that ran, and the record of the withdrawal names who made it. What changes is what the
-	// name may still be used *for* — see TemplateArchival.
-	//
-	// It returns ErrNotFound for a name with no versions, and ErrConflict for one already archived. The
-	// second is a conflict rather than a no-op so that a client acting on a stale listing learns that
-	// it was stale.
-	ArchiveTemplate(ctx context.Context, a TemplateArchival) error
-
-	// RestoreTemplate puts an archived template name back into use.
-	//
-	// It deletes the archival record and nothing else, which is why the record carries nothing that
-	// could be lost. Restoring is not an approval of anything: the restored name is issuable at
-	// enrolment again only under exactly the conditions that governed it before, signature included.
-	//
-	// It returns ErrNotFound for a name with no versions, and ErrConflict for one that is not archived.
-	RestoreTemplate(ctx context.Context, name string) error
-
-	// GetTemplateArchival reports whether a template name has been withdrawn, and by whom.
-	//
-	// A live name is the zero value and no error, because "not archived" is the ordinary state of every
-	// template ever stored. A separate read rather than a field on TemplateVersion: a version is a row
-	// written once and never updated, and a field on it that came from another table and changed
-	// underneath would make that sentence false for whoever read it next.
-	GetTemplateArchival(ctx context.Context, name string) (TemplateArchival, error)
-
-	// ListTemplateVersions returns every stored revision of one template, newest first.
-	//
-	// Bodies are not included: this answers "what revisions exist and who made them", which is the
-	// question an operator asks when a host's bootstrap record names version 3 and the current one is
-	// 7. A caller that wants a body names a version and asks for it.
-	//
-	// An unknown name returns ErrNotFound rather than an empty list, because "this template has no
-	// versions" is not a state that can exist — a template comes into being by having one.
-	ListTemplateVersions(ctx context.Context, name string) ([]TemplateRevision, error)
-
-	// GetTemplateVersion returns one version of a template, or ErrNotFound.
-	//
-	// Version 0 means the latest, which is what enrolment issues and what the editor opens; a positive
-	// version names one exactly, which is what a bootstrap record on a host resolves against.
-	GetTemplateVersion(ctx context.Context, name string, version int) (TemplateVersion, error)
 
 	// RecordEvent appends one event to the tenant's inbox, evicting past MaxEventsPerTenant.
 	RecordEvent(ctx context.Context, e Event) error

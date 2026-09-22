@@ -107,11 +107,9 @@ services:
       HOSTSEAL_BOOTSTRAP_PASSWORD: ${HOSTSEAL_BOOTSTRAP_PASSWORD:-}
       HOSTSEAL_TENANT: ${HOSTSEAL_TENANT:-default}
     volumes:
-      # The CA that issues agent certificates, the key that signs routine jobs, and the key that seals
-      # template bodies. All three live here and none of them is in the database — which is the point:
-      # a database dump is not a set of provisioning scripts, and it does not let its holder impersonate
-      # a host. Back it up separately from the database and restore the two together: a database without
-      # the key beside it leaves every stored template permanently unopenable.
+      # The CA that issues agent certificates and the key that signs routine jobs. Both live here and
+      # neither is in the database — which is the point: a database dump does not let its holder
+      # impersonate a host. Back it up separately from the database and restore the two together.
       - hostseal-state:/var/lib/hostseal-server
     ports:
       # Published so that a fresh clone works with nothing else running. compose.traefik.yaml removes

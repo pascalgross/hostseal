@@ -6,7 +6,6 @@ import { MatCardModule } from '@angular/material/card';
 import { MatFormFieldModule } from '@angular/material/form-field';
 import { MatIconModule } from '@angular/material/icon';
 import { MatInputModule } from '@angular/material/input';
-import { MatMenuModule } from '@angular/material/menu';
 import { MatProgressBarModule } from '@angular/material/progress-bar';
 import { MatTableModule } from '@angular/material/table';
 import { MatTooltipModule } from '@angular/material/tooltip';
@@ -16,7 +15,6 @@ import {
   EnrolmentInstructions,
   EnrolmentTokenSummary,
   MintedEnrolmentToken,
-  TemplateSummary,
 } from '../core/api.models';
 import { ApiService } from '../core/api.service';
 import { describeError } from '../core/errors';
@@ -130,7 +128,6 @@ const windowsCLI = `& '${windowsInstallDir}\\hostseal.exe'`;
     MatFormFieldModule,
     MatIconModule,
     MatInputModule,
-    MatMenuModule,
     MatProgressBarModule,
     MatTableModule,
     MatTooltipModule,
@@ -201,30 +198,7 @@ export class EnrolPanel {
   private tokensRead = 0;
 
   /** The columns of the token listing, in order. */
-  protected readonly tokenColumns = ['label', 'group', 'bootstrap', 'created', 'state'];
-
-  /**
-   * The templates a token could name, null until the listing has answered.
-   *
-   * Read alongside the instructions rather than on demand, because the choice is offered from a menu
-   * and a menu that fills in after it is opened is a menu whose first item moves under the pointer.
-   * A listing that fails leaves this null, and the panel then offers a plain token and nothing else:
-   * enrolment does not depend on templates and must not be blocked by them.
-   */
-  protected readonly templates = signal<TemplateSummary[] | null>(null);
-
-  /**
-   * The templates a token may be minted for: signed, and not withdrawn.
-   *
-   * The same two conditions the control plane checks when a token is minted, applied here so the
-   * menu offers nothing it would refuse. An unsigned template is one no enrolling host would accept —
-   * the host verifies the signature against its own trusted-signers, and this control plane cannot
-   * produce one — and an archived name is refused at enrolment, on the machine, which is the worst
-   * place to find out. The check is repeated on the server; this is the copy that saves a click.
-   */
-  protected readonly bootstraps = computed(() =>
-    (this.templates() ?? []).filter((template) => template.signed && !template.archived),
-  );
+  protected readonly tokenColumns = ['label', 'group', 'created', 'state'];
 
   /** Whether a request is in flight, so the button can be disabled. */
   protected readonly busy = signal(false);
@@ -522,39 +496,10 @@ export class EnrolPanel {
         'Restart-Service hostseal-agent',
       ].join('\n');
     }
-    const bootstrap = this.minted()?.bootstrap;
-    if (bootstrap) {
-      // `--signers` travels with `--bootstrap` because the agent refuses one without the other, and
-      // the refusal is the mechanism: the template is verified against a key from a file the operator
-      // put on the host, before anything is fetched, so that a control plane which owns the token
-      // still cannot choose what runs. A command that named the template and left the file to a
-      // footnote would fail on the machine with an error about ordering.
-      return [
-        `sudo hostseal enroll --server ${details.agentUrl} --token ${token} \\`,
-        `  --signers ./trusted-signers --bootstrap ${bootstrap}`,
-        'sudo systemctl restart hostseal-agent',
-      ].join('\n');
-    }
     return [
       `sudo hostseal enroll --server ${details.agentUrl} --token ${token}`,
       'sudo systemctl restart hostseal-agent',
     ].join('\n');
-  });
-
-  /**
-   * The template the minted token arms, as the listing describes it, or null for a plain token.
-   *
-   * Looked up rather than remembered from the click, because what the panel has to say about it — the
-   * key that signed it, which the host's trusted-signers file must list — is on the summary and not on
-   * the token. A template that vanished from the listing between minting and now still leaves the
-   * name in the command; only the sentence about the key is lost.
-   */
-  protected readonly mintedBootstrap = computed(() => {
-    const name = this.minted()?.bootstrap;
-    if (!name) {
-      return null;
-    }
-    return this.templates()?.find((template) => template.name === name) ?? null;
   });
 
   /** Where the CA certificate can be downloaded, for an operator who would rather have the file. */
@@ -581,12 +526,6 @@ export class EnrolPanel {
         this.error.set('');
       },
       error: (err: unknown) => this.error.set(describeError(err)),
-    });
-    this.api.templates().subscribe({
-      next: (listing) => this.templates.set(listing.templates),
-      // Silently: a token menu with one fewer option is what a failed listing costs, and enrolment
-      // must not read as broken because a page about templates could not be loaded.
-      error: () => this.templates.set(null),
     });
     this.loadTokens();
   }
@@ -632,22 +571,15 @@ export class EnrolPanel {
   }
 
   /**
-   * Mints one single-use enrolment token, plain or naming a template it may request.
+   * Mints one single-use enrolment token.
    *
    * The result is shown once and never again — only its SHA-256 is stored — which the panel says at
    * the moment it is shown rather than in a footnote. A token nobody copied is not recoverable and is
    * not a problem: minting another costs one click.
-   *
-   * The template is decided here, by whoever is signed in, and stamped on the token: the host that
-   * redeems it may request that template and no other. It could not be otherwise — a token that let
-   * its holder choose would let anybody who found one choose what runs as root on a new machine. The
-   * label says which it was, so the token list can tell a plain token from an armed one.
    */
-  protected mint(bootstrap = ''): void {
+  protected mint(): void {
     const request: CreateEnrolmentTokenRequest = {
-      label:
-        this.tokenLabel().trim() ||
-        (bootstrap ? `from the fleet page, for ${bootstrap}` : 'from the fleet page'),
+      label: this.tokenLabel().trim() || 'from the fleet page',
       group: this.tokenGroup().trim(),
     };
     // An empty field is the control plane's default and is sent as nothing. Anything else has to be
@@ -665,9 +597,6 @@ export class EnrolPanel {
         return;
       }
       request.ttlSeconds = hours * 3600;
-    }
-    if (bootstrap) {
-      request.bootstrap = bootstrap;
     }
     this.busy.set(true);
     this.mintError.set('');
@@ -687,7 +616,7 @@ export class EnrolPanel {
   /**
    * Copies one command, and remembers which so the button can confirm it.
    *
-   * Best-effort, like the template page's copy: the text is on screen and selectable, and a browser
+   * Best-effort: the text is on screen and selectable, and a browser
    * refusing clipboard access — several do without a gesture they recognise — must not look like the
    * command itself is wrong.
    */

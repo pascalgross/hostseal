@@ -8,7 +8,6 @@ import {
   EnrolmentInstructions,
   EnrolmentTokenSummary,
   EnrolmentTokensResponse,
-  TemplateSummary,
 } from '../core/api.models';
 import { EnrolPanel } from './enrol-panel';
 
@@ -22,21 +21,6 @@ function instructions(partial: Partial<EnrolmentInstructions> = {}): EnrolmentIn
     aptUrl: 'https://hostseal.io/apt',
     windowsArchiveUrl:
       'https://github.com/pascalgross/hostseal/releases/latest/download/hostseal-agent-windows-amd64.zip',
-    ...partial,
-  };
-}
-
-/** Builds one template listing row, so a spec names only what it is about. */
-function template(partial: Partial<TemplateSummary>): TemplateSummary {
-  return {
-    name: 'standard-server',
-    latestVersion: 1,
-    createdAt: '2026-08-24T09:41:07.512Z',
-    createdBy: 'test:tester',
-    signed: true,
-    signerKeyId: 'ops-yubikey-1',
-    signerAlgorithm: 'ecdsa-p256',
-    archived: false,
     ...partial,
   };
 }
@@ -76,8 +60,8 @@ interface PanelInternals {
   /** Reads the instructions, which the disclosure element does on open. */
   load(): void;
 
-  /** Mints one enrolment token, naming a template when one is given. */
-  mint(bootstrap?: string): void;
+  /** Mints one enrolment token. */
+  mint(): void;
 
   /** The page's own address, which the CA command is built against. */
   pageBase(): string;
@@ -105,7 +89,6 @@ interface PanelInternals {
 function render(
   details: EnrolmentInstructions,
   pageBase = 'https://hostseal.example.org/',
-  templates: TemplateSummary[] = [],
   minted: CreateEnrolmentTokenRequest[] = [],
   tokens: EnrolmentTokenSummary[] = [],
 ): ComponentFixture<EnrolPanel> {
@@ -117,7 +100,6 @@ function render(
         provide: ApiService,
         useValue: {
           enrolment: () => of(details),
-          templates: () => of({ templates }),
           enrolmentTokens: () => of({ tokens }),
           createEnrolmentToken: (request: CreateEnrolmentTokenRequest) => {
             minted.push(request);
@@ -126,7 +108,6 @@ function render(
               label: request.label,
               group: '',
               expiresAt: '2026-08-29T00:00:00Z',
-              ...(request.bootstrap ? { bootstrap: request.bootstrap } : {}),
             });
           },
         } as unknown as ApiService,
@@ -287,113 +268,6 @@ describe('EnrolPanel', () => {
   });
 
   /**
-   * A token for a template is offered only for templates a host could actually be handed.
-   *
-   * The control plane refuses to mint a token naming an unsigned or archived template, and it is
-   * right to: an enrolling host verifies the template's signature against its own trusted-signers,
-   * which this control plane cannot satisfy, and an archived name is refused at enrolment. A menu
-   * that listed those would offer choices that fail — either here, with an error, or on the machine,
-   * which is worse. So the menu is the control plane's rule applied in advance, and a fleet with no
-   * signed template gets the plain button and no menu at all.
-   */
-  it('offers a token only for signed, live templates', () => {
-    const withChoices = render(instructions(), 'https://hostseal.example.org/', [
-      template({ name: 'baseline' }),
-      template({ name: 'unsigned', signed: false }),
-      template({ name: 'retired', archived: true }),
-    ]);
-    const handle = withChoices.nativeElement.querySelector('.hostseal-split__more') as HTMLElement;
-    expect(handle).not.toBeNull();
-    handle.click();
-    withChoices.detectChanges();
-
-    const items = Array.from(document.querySelectorAll('[mat-menu-item]')).map((item) =>
-      text(item),
-    );
-    expect(items).toEqual(['Generate token for baseline']);
-
-    const withoutChoices = render(instructions(), 'https://hostseal.example.org/', [
-      template({ name: 'unsigned', signed: false }),
-    ]);
-    expect(withoutChoices.nativeElement.querySelector('.hostseal-split__more')).toBeNull();
-    expect(text(withoutChoices.nativeElement)).toContain('Generate token');
-  });
-
-  /**
-   * A token minted for a template names it in the request, and the command names it on the host.
-   *
-   * The template is chosen here, by an authenticated operator, and stamped on the token; the command
-   * carries `--bootstrap` and `--signers` together because the agent refuses one without the other.
-   * That pairing is the mechanism rather than a convenience: the trust anchor is a file the operator
-   * puts on the host before anything is fetched, so a control plane that owns the token still cannot
-   * choose what runs. A command that omitted the file would fail on the machine, with an error about
-   * ordering that nothing on this page explains.
-   */
-  it('mints a token for the chosen template and pairs --bootstrap with --signers', () => {
-    const minted: CreateEnrolmentTokenRequest[] = [];
-    const fixture = render(
-      instructions(),
-      'https://hostseal.example.org/',
-      [template({ name: 'baseline', signerKeyId: 'ops-yubikey-1' })],
-      minted,
-    );
-
-    (fixture.componentInstance as unknown as PanelInternals).mint('baseline');
-    fixture.detectChanges();
-
-    expect(minted).toEqual([
-      { label: 'from the fleet page, for baseline', group: '', bootstrap: 'baseline' },
-    ]);
-    const rendered = text(fixture.nativeElement);
-    expect(rendered).toContain('--token frr-enrol-abcdef');
-    expect(rendered).toContain('--signers ./trusted-signers --bootstrap baseline');
-    expect(rendered).toContain('ops-yubikey-1');
-  });
-
-  /**
-   * A plain token sends no template at all, rather than an empty one.
-   *
-   * The two are the same to the control plane today; the assertion is that the panel's default
-   * remains the case it always minted, so a fleet that never signs a template sees no change.
-   */
-  it('mints a plain token with no bootstrap when none is chosen', () => {
-    const minted: CreateEnrolmentTokenRequest[] = [];
-    const fixture = render(
-      instructions(),
-      'https://hostseal.example.org/',
-      [template({ name: 'baseline' })],
-      minted,
-    );
-
-    (fixture.componentInstance as unknown as PanelInternals).mint();
-    fixture.detectChanges();
-
-    expect(minted).toEqual([{ label: 'from the fleet page', group: '' }]);
-    expect(text(fixture.nativeElement)).not.toContain('--bootstrap');
-  });
-
-  /**
-   * A Windows host is not offered a template, and a token that names one is called out there.
-   *
-   * A bootstrap is applied through cloud-init, which a Windows host does not run. The menu that
-   * would mint such a token is withheld on that platform, and a token already minted for a template
-   * is not silently printed into a PowerShell command that cannot honour it.
-   */
-  it('withholds the template menu on Windows and says why a template token will not work there', () => {
-    const fixture = render(instructions(), 'https://hostseal.example.org/', [
-      template({ name: 'baseline' }),
-    ]);
-    (fixture.componentInstance as unknown as PanelInternals).mint('baseline');
-    (fixture.componentInstance as unknown as PanelInternals).showPlatform('windows');
-    fixture.detectChanges();
-
-    expect(fixture.nativeElement.querySelector('.hostseal-split__more')).toBeNull();
-    const rendered = text(fixture.nativeElement);
-    expect(rendered).not.toContain('--bootstrap');
-    expect(rendered).toContain('a Windows host cannot apply one');
-  });
-
-  /**
    * The label, the group and the lifetime reach the control plane when they are filled in, and the
    * request carries no lifetime when the field is empty.
    *
@@ -405,7 +279,7 @@ describe('EnrolPanel', () => {
    */
   it('sends the label, the group and the lifetime, and omits a lifetime that was not chosen', () => {
     const minted: CreateEnrolmentTokenRequest[] = [];
-    const fixture = render(instructions(), 'https://hostseal.example.org/', [], minted);
+    const fixture = render(instructions(), 'https://hostseal.example.org/', minted);
     const panel = fixture.componentInstance as unknown as PanelInternals;
 
     panel.mint();
@@ -431,7 +305,7 @@ describe('EnrolPanel', () => {
    */
   it('refuses to mint against a lifetime that is not a whole positive number of hours', () => {
     const minted: CreateEnrolmentTokenRequest[] = [];
-    const fixture = render(instructions(), 'https://hostseal.example.org/', [], minted);
+    const fixture = render(instructions(), 'https://hostseal.example.org/', minted);
     const panel = fixture.componentInstance as unknown as PanelInternals;
 
     for (const hours of [0, -1, 1.5, Number.NaN]) {
@@ -471,7 +345,6 @@ describe('EnrolPanel', () => {
           provide: ApiService,
           useValue: {
             enrolment: () => of(instructions()),
-            templates: () => of({ templates: [] }),
             enrolmentTokens: () => answers.shift()!.asObservable(),
             createEnrolmentToken: () =>
               of({ token: 'frr-enrol-abcdef', label: 'x', group: '', expiresAt: '2026-08-29T00:00:00Z' }),
@@ -501,10 +374,10 @@ describe('EnrolPanel', () => {
    * sat open for a day. The listing also has to name the host that spent a token, because that is
    * the one line of provenance an enrolment leaves behind.
    */
-  it('lists every token with its label, its template and where it stands', () => {
+  it('lists every token with its label and where it stands', () => {
     const rendered = text(
-      render(instructions(), 'https://hostseal.example.org/', [], [], [
-        tokenRow({ label: 'web tier', group: 'web-prod', bootstrap: 'baseline' }),
+      render(instructions(), 'https://hostseal.example.org/', [], [
+        tokenRow({ label: 'web tier', group: 'web-prod' }),
         tokenRow({ label: 'db-07', consumed: true, consumedByHost: 'db-07', usable: false }),
         tokenRow({ label: 'forgotten', usable: false }),
       ]).nativeElement,
@@ -512,7 +385,6 @@ describe('EnrolPanel', () => {
 
     expect(rendered).toContain('web tier');
     expect(rendered).toContain('web-prod');
-    expect(rendered).toContain('baseline');
     expect(rendered).toContain('open');
     expect(rendered).toContain('used by db-07');
     expect(rendered).toContain('expired unused');

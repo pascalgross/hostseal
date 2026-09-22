@@ -15,7 +15,6 @@ import (
 	"github.com/pascalgross/hostseal/internal/autostart"
 	"github.com/pascalgross/hostseal/internal/localsign"
 	"github.com/pascalgross/hostseal/internal/prompt"
-	"github.com/pascalgross/hostseal/internal/protocol"
 	"github.com/pascalgross/hostseal/internal/signing"
 )
 
@@ -93,11 +92,10 @@ func newSignerFlags() (*flag.FlagSet, signerFlags) {
 
 // signerCommand implements `hostseal signer`.
 //
-// It is `hostseal sign` and `hostseal sign-template` with the copying taken out, and it is
-// deliberately not more than that. An operator on a Windows workstation with a YubiKey can sign a
-// bootstrap template — or a reboot — from the web interface: the browser says what it wants signed, a
-// human here reads what that means and answers a prompt, the token is touched, and a detached
-// signature goes back. The key never leaves the token, and the control plane still holds nothing it
+// It is `hostseal sign` with the copying taken out, and it is deliberately not more than that. An
+// operator on a Windows workstation with a YubiKey can sign a reboot from the web interface: the
+// browser says what it wants signed, a human here reads what that means and answers a prompt, the
+// token is touched, and a detached signature goes back. The key never leaves the token, and the control plane still holds nothing it
 // could mint a signature with.
 //
 // Three things about the shape are worth stating where somebody would change them.
@@ -106,13 +104,13 @@ func newSignerFlags() (*flag.FlagSet, signerFlags) {
 // chosen by a web page would be a web page choosing which shared library this process loads, which is
 // a remote code execution with extra steps.
 //
-// The signed payload is built by internal/localsign out of the name and the body, never received. A
-// service that signed a digest supplied by a page would let a compromised control plane show one
-// template in the browser and have another signed — the exact property `hostseal sign` exists to
-// refuse.
+// The signed payload is built by internal/localsign out of the host, the intent and its parameters,
+// never received. A service that signed a digest supplied by a page would let a compromised control
+// plane show one operation in the browser and have another signed — the exact property `hostseal
+// sign` exists to refuse.
 //
-// And the confirmation is here, on the machine holding the token, showing the body in full. The
-// browser's rendering is not what is authorised; this one is. An operator who is shown something here
+// And the confirmation is here, on the machine holding the token, showing the job decoded against
+// this build's own catalogue. The browser's rendering is not what is authorised; this one is. An operator who is shown something here
 // that they did not ask for in the browser has just caught a compromised control plane, and says no.
 //
 // --install and --uninstall register and remove a logon entry that runs this same command in the
@@ -177,9 +175,6 @@ func signerCommand(argv []string) int {
 	service, err := localsign.New(localsign.Options{
 		Signer:  signer,
 		Origins: origins,
-		Confirm: func(req localsign.Request) (bool, error) {
-			return confirmBrowserTemplate(req, signer)
-		},
 		ConfirmJob: func(req localsign.JobConfirmation) (bool, error) {
 			return confirmBrowserJob(req, signer)
 		},
@@ -209,12 +204,12 @@ func signerCommand(argv []string) int {
 // describeSigner renders the banner the operator reads once, when the signer starts.
 //
 // It carries the trusted-signers line because that is the half of this arrangement the tooling cannot
-// do for anybody: a template signed by a key no host trusts is refused at every enrolment, and the
-// remedy is this line, pasted by an administrator onto the hosts that key may act on. It has to be a
+// do for anybody: a job signed by a key no host trusts is refused by every host, and the remedy is
+// this line, pasted by an administrator onto the hosts that key may act on. It has to be a
 // deliberate edit — see `hostseal key generate`, which says the same thing for the same reason.
 //
 // It returns the text rather than printing it so that a test can assert what an operator is told,
-// which is the same reason describeJob and describeTemplate do.
+// which is the same reason describeJob does.
 func describeSigner(signer signing.Signer, addr string, origins []string, idle time.Duration) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "\n  Signing key  %s (%s, %s)\n", signer.KeyID(), signer.Backend(), signer.Algorithm())
@@ -223,13 +218,13 @@ func describeSigner(signer signing.Signer, addr string, origins []string, idle t
 	fmt.Fprintf(&b, "  Idle exit    after %s with no request\n", idle)
 
 	if line, err := signing.TrustedSignerLine(signer); err == nil {
-		fmt.Fprintf(&b, "\n  A host applies a template signed by this key only if this line is in its\n"+
+		fmt.Fprintf(&b, "\n  A host acts on a job signed by this key only if this line is in its\n"+
 			"  own %s:\n\n    %s\n", signing.TrustedSignersPath, line)
 	}
 
-	fmt.Fprintf(&b, "\n  Every signature is confirmed here — a template shown in full, a job decoded\n"+
-		"  against this build's own catalogue. The browser never sees the key, and this machine\n"+
-		"  never sends it anywhere. Ctrl-C to stop.\n\n")
+	fmt.Fprintf(&b, "\n  Every signature is confirmed here — the job decoded against this build's own\n"+
+		"  catalogue. The browser never sees the key, and this machine never sends it anywhere.\n"+
+		"  Ctrl-C to stop.\n\n")
 	return b.String()
 }
 
@@ -244,19 +239,6 @@ func confirmBrowserJob(req localsign.JobConfirmation, signer signing.Signer) (bo
 	fmt.Fprintf(os.Stderr, "\n  Asked for by %s\n", req.Origin)
 	fmt.Fprint(os.Stderr, describeJob(req.Job, req.Spec, req.Params, req.HostID, signer, req.Payload))
 	return prompt.Confirm("Sign this? [y/N] ")
-}
-
-// confirmBrowserTemplate shows what a browser has asked to have signed, and asks.
-//
-// It reuses describeTemplate, which is what `hostseal sign-template` prints, so the two cannot drift
-// into showing an operator different things about the same act. What it adds is the origin: "sign this
-// template" and "sign this template, because https://hostseal.example.org asked" are different
-// questions, and only the second one can be answered wrongly on purpose.
-func confirmBrowserTemplate(req localsign.Request, signer signing.Signer) (bool, error) {
-	bootstrap := protocol.Bootstrap{Name: req.Name, Body: req.Body}
-	fmt.Fprintf(os.Stderr, "\n  Asked for by %s\n", req.Origin)
-	fmt.Fprint(os.Stderr, describeTemplate(bootstrap, signer))
-	return prompt.Confirm("Sign this template? [y/N] ")
 }
 
 // signerArgs rebuilds the command line that --install registers.

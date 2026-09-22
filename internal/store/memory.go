@@ -136,16 +136,6 @@ type Memory struct {
 	// scoped.
 	waiters map[string][]chan struct{}
 
-	// templates are provisioning template versions by tenant, name and version, immutable once written.
-	templates map[templateKey]TemplateVersion
-
-	// archivedTemplates are the template names withdrawn from use, by tenant and name.
-	//
-	// Separate from the versions above for the reason the schema keeps a separate table: a withdrawal is
-	// a fact about a name, and holding it on the version rows would mean writing to a row that is
-	// documented three lines up as immutable once written.
-	archivedTemplates map[templateNameKey]TemplateArchival
-
 	// events is every tenant's inbox, oldest first, evicted per tenant past MaxEventsPerTenant.
 	events []eventRow
 
@@ -201,21 +191,19 @@ func NewMemory() *Memory {
 				ApprovalMode: ApprovalNone,
 			},
 		},
-		tokens:            map[string]tokenRow{},
-		hosts:             map[string]hostRow{},
-		certs:             map[string]Certificate{},
-		jobs:              map[queueKey][]protocol.Job{},
-		records:           map[jobKey]JobRecord{},
-		results:           map[jobKey]protocol.ResultRequest{},
-		waiters:           map[string][]chan struct{}{},
-		templates:         map[templateKey]TemplateVersion{},
-		archivedTemplates: map[templateNameKey]TemplateArchival{},
-		rules:             map[ruleKey]AlertRule{},
-		states:            map[stateKey]AlertState{},
-		accounts:          map[string]Account{},
-		sessions:          map[string]Session{},
-		apiTokens:         map[string]APIToken{},
-		shares:            map[string]wallboardShareRow{},
+		tokens:    map[string]tokenRow{},
+		hosts:     map[string]hostRow{},
+		certs:     map[string]Certificate{},
+		jobs:      map[queueKey][]protocol.Job{},
+		records:   map[jobKey]JobRecord{},
+		results:   map[jobKey]protocol.ResultRequest{},
+		waiters:   map[string][]chan struct{}{},
+		rules:     map[ruleKey]AlertRule{},
+		states:    map[stateKey]AlertState{},
+		accounts:  map[string]Account{},
+		sessions:  map[string]Session{},
+		apiTokens: map[string]APIToken{},
+		shares:    map[string]wallboardShareRow{},
 	}
 }
 
@@ -427,16 +415,6 @@ func (m *Memory) DeleteTenant(_ context.Context, id TenantID) error {
 	for key := range m.results {
 		if key.tenant == id {
 			delete(m.results, key)
-		}
-	}
-	for key := range m.templates {
-		if key.tenant == id {
-			delete(m.templates, key)
-		}
-	}
-	for key := range m.archivedTemplates {
-		if key.tenant == id {
-			delete(m.archivedTemplates, key)
 		}
 	}
 	keptEvents := m.events[:0]

@@ -11,8 +11,8 @@ By [Pascal Groß](https://hostseal.io). Licensed **Apache-2.0**.
 Documentation: [hostseal.io](https://hostseal.io).
 
 > [!IMPORTANT]
-> HostSeal has **shipped phases 1, 2 and 3, and there is no phase 4** — the sequence ends where the
-> product does, and it stops there on purpose.
+> HostSeal has **shipped phase 1, taken phases 2 and 3 out again, and there is no phase 4** — the
+> sequence ends where the product does, and it stops there on purpose.
 >
 > **Phase 1 — the intent catalogue.** All ten catalogue members have an executor: the four read-only
 > operations, the one routine operation, and all five destructive ones — apply every update, start,
@@ -32,18 +32,13 @@ Documentation: [hostseal.io](https://hostseal.io).
 > destructive job, because that needs a key the control plane does not hold and a browser is the last
 > place it should ever be.
 >
-> The two provisioning phases stay numbered, because a tier boundary is what each of them crossed:
->
-> - **Phase 2 — Tier 1 provisioning** ([#9](https://github.com/pascalgross/hostseal/issues/9)), shipped:
->   cloud-init templates stored, versioned, encrypted at rest and rendered by HostSeal, and handed to
->   *you* — Terraform, Proxmox, MAAS, a cloud provider's user-data field. HostSeal is never in the
->   delivery path. It came before Tier 2 by dependency: phase 3 applies a *named* template, so storage
->   had to exist before anything could name one.
-> - **Phase 3 — Tier 2 provisioning** ([#10](https://github.com/pascalgross/hostseal/issues/10)),
->   shipped: `hostseal enroll --bootstrap NAME` applies one named template, exactly once, at enrolment,
->   behind every guardrail [`docs/SECURITY.md` §7](docs/SECURITY.md#7-provisioning-and-the-enrolment-time-exception)
->   lists — and cloud-init does the applying. It is the enrolment-time exception the second paragraph
->   of the guarantee names, which is why that paragraph is never omitted.
+> **Phases 2 and 3 were provisioning, and they have been taken out again.** They stored cloud-init
+> templates on the control plane and applied one at enrolment, and what they bought was never worth
+> what they cost: a second signing path, a second trust argument, an exception in the guarantee that
+> had to be quoted beside it every time, and a workflow operators found harder to follow than the
+> problem it solved. What a machine looks like on its first boot is a decision for whatever builds
+> the machine — Terraform, Proxmox, MAAS, a cloud provider's own user-data field — and HostSeal now
+> leaves it there entirely. See [`docs/SECURITY.md` §7](docs/SECURITY.md#7-provisioning).
 >
 > **The product ends at the enrolment boundary, and that is what it is for.** Once a host is enrolled,
 > the control plane may ask it for one of ten typed operations and can never hand it new instructions.
@@ -64,14 +59,9 @@ Documentation: [hostseal.io](https://hostseal.io).
 > An attacker who fully owns the HostSeal control plane, its database, and an administrator account
 > still cannot run arbitrary code on any **enrolled** host, cannot exceed any host's local policy, and
 > cannot reboot or stop services on hosts whose policy forbids it.
->
-> A host **being enrolled** applies, at most once, the bootstrap template its operator named on the
-> command line — shown in full before it runs, signed by a key from that host's own
-> `trusted-signers`, and recorded permanently on the host.
 
-Both paragraphs ship together, always. The second is the price of the bootstrap feature, and a
-guarantee with an undisclosed exception is worse than no guarantee — so the first paragraph is never
-quoted on its own just because it reads better.
+There is no second paragraph and no footnote. The sentence has no exception, and the `guarantee`
+workflow fails if it is changed by a word in this file or in `docs/SECURITY.md`.
 
 Landscape, Salt, Uyuni and Rudder all ship a remote execution channel. HostSeal does not. **That
 absence is the product**, and everything below exists to make the absence hold up under a control
@@ -107,11 +97,6 @@ workflow that no maintainer can override:
   and Debian, plus `needrestart`'s answer to "which running services still hold the old library".
 - **Policy-gated update application** — the host decides what it will accept; the control plane can
   only ask for something within that.
-- **Provisioning templates** — cloud-init templates stored, versioned, encrypted at rest and rendered
-  by HostSeal, and handed to *you*. HostSeal is not in the delivery path. A template signed offline may
-  additionally be applied by a machine **once, at enrolment**, which is the one exception to
-  everything else here and is argued out in
-  [`docs/SECURITY.md` §7](docs/SECURITY.md#7-provisioning-and-the-enrolment-time-exception).
 - **Observability that reaches somebody** — unit-state history at heartbeat resolution, a durable
   event inbox, a live feed in the interface, and alerting rules that mail, post to a webhook or raise
   a browser notification. A rule produces a notification and never a job; see

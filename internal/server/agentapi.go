@@ -134,17 +134,6 @@ func (s *Server) handleEnroll(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// The bootstrap template is resolved before the certificate is issued and before the token is
-	// consumed, for the same reason the CSR is checked before consumption: a refusal here must leave
-	// the token usable, so the operator can fix what was named and retry — or retry without
-	// --bootstrap — rather than being told their token is spent. Silence is not an acceptable answer
-	// to a bootstrap request: either the template comes back signed, or the enrolment fails with a
-	// message naming why, and the agent refuses to continue either way.
-	bootstrap, ok := s.resolveBootstrap(w, r, tenant, HashToken(req.Token), req.RequestedBootstrap)
-	if !ok {
-		return // resolveBootstrap has written the refusal.
-	}
-
 	hostID, err := NewID()
 	if err != nil {
 		slog.Error("could not generate a host id", "error", err)
@@ -177,19 +166,6 @@ func (s *Server) handleEnroll(w http.ResponseWriter, r *http.Request) {
 		slog.Error("could not consume an enrolment token", "error", err)
 		writeError(w, http.StatusInternalServerError, "internal", "could not redeem the token")
 		return
-	}
-
-	// The template is checked once more, now that the redemption has committed, because the check in
-	// resolveBootstrap ran before the certificate was issued and before the token was spent — and a
-	// template withdrawn in between would otherwise be handed to this machine although the fleet had
-	// already retired it. Redemption is the moment this enrolment becomes the one that happened, so
-	// that is the moment the template has to still be in use; the same shape as the host limit below,
-	// which is checked early to refuse cheaply and again at the atomic point to refuse correctly.
-	//
-	// Only for an enrolment that asked for a bootstrap. A token naming an archived template still
-	// enrols a machine without one, which is the retry an operator makes after reading the refusal.
-	if bootstrap != nil && !s.bootstrapSurvivedRedemption(w, r, tenant, bootstrap.Name) {
-		return // bootstrapSurvivedRedemption has written the refusal.
 	}
 
 	host := store.Host{
@@ -241,14 +217,6 @@ func (s *Server) handleEnroll(w http.ResponseWriter, r *http.Request) {
 		Summary: req.Hostname + " enrolled into group " + token.Group,
 	})
 
-	if bootstrap != nil {
-		// The name and version, and never the body: the body reaches the journal on the host, printed
-		// by the agent to the operator authorising it, which is where it belongs.
-		slog.Info("bootstrap template issued",
-			"host", hostID, "tenant", tenantID, "template", bootstrap.Name,
-			"template_version", bootstrap.Version, "signer", bootstrap.SignerKeyID)
-	}
-
 	writeJSON(w, http.StatusOK, protocol.EnrollResponse{
 		OnlineKey:            s.onlineKeyLine(),
 		HostID:               hostID,
@@ -256,155 +224,7 @@ func (s *Server) handleEnroll(w http.ResponseWriter, r *http.Request) {
 		CABundle:             string(s.cfg.Authority.CertificatePEM()),
 		ServerTime:           now.UTC(),
 		NextHeartbeatSeconds: s.cfg.HeartbeatSeconds,
-		Bootstrap:            bootstrap,
 	})
-}
-
-// bootstrapSurvivedRedemption reports whether a resolved template is still in use, answering the agent
-// if not.
-//
-// It runs after the token has been consumed and before the host exists, which is the only place this
-// refusal can leave nothing behind: no host row, no recorded certificate, and a machine that is told
-// plainly what happened. The token is spent by then — consuming it is what proves this enrolment is the
-// one that redeemed it — so the message says so rather than leaving an operator to discover it on a
-// retry that answers "token unusable".
-//
-// It narrows the window rather than closing it: an archival committing between the redemption and this
-// read still lets one machine through. Closing it exactly would mean making the redemption itself
-// conditional on a template's state, which couples the single-use property the whole enrolment path
-// rests on to something it has nothing to do with — and buys, against a template the operator signed
-// offline, named in the token, and which the host verifies, records and prints before applying, one
-// machine's worth of staleness.
-func (s *Server) bootstrapSurvivedRedemption(w http.ResponseWriter, r *http.Request,
-	tenant store.Scoped, name string) bool {
-
-	archival, err := tenant.GetTemplateArchival(r.Context(), name)
-	if err != nil {
-		slog.Error("could not re-read a template's archival", "error", err, "template", name)
-		writeError(w, http.StatusInternalServerError, "internal", "could not read the template")
-		return false
-	}
-	if !archival.Archived() {
-		return true
-	}
-
-	slog.Info("enrolment refused by a template archived while it was in flight",
-		"template", name, "tenant", tenant.Tenant())
-	writeError(w, http.StatusConflict, "archived_template",
-		"the template "+name+" was archived while this enrolment was in flight; nothing was applied "+
-			"and nothing on this machine has been changed. The enrolment token has been spent, so "+
-			"issue a new one once the template is restored or another is named.")
-	return false
-}
-
-// resolveBootstrap turns a requested template name into the signed template the response will carry.
-//
-// It returns (nil, true) when nothing was requested, (template, true) on success, and (nil, false)
-// after writing a refusal — and a refusal is the only alternative to success, because an agent that
-// asked for a template and silently received none must not proceed as though one had been applied.
-//
-// Two properties here carry the second paragraph of the guarantee:
-//
-// The token decides. A token names the one template it may request, at mint time, by an authenticated
-// operator. A request naming anything else is refused before anything is consumed, so possession of a
-// leaked token is not the authority to choose what runs on the machine being enrolled.
-//
-// The signature is not this control plane's to make. The stored signature was produced offline by
-// `hostseal sign-template`, with a key this process does not hold, and it is handed over verbatim. An
-// unsigned template is a refusal rather than an invitation to sign: a control plane that could sign a
-// bootstrap template could run operator-authored configuration on a host at enrolment, which is
-// precisely the hole the guarantee's second paragraph is scoped to keep narrow.
-// TestGuaranteeTheControlPlaneCannotSignABootstrapTemplate asserts both directions of that.
-func (s *Server) resolveBootstrap(w http.ResponseWriter, r *http.Request, tenant store.Scoped,
-	tokenHash, requested string) (*protocol.Bootstrap, bool) {
-
-	if requested == "" {
-		return nil, true
-	}
-
-	token, err := tenant.GetEnrollmentToken(r.Context(), tokenHash)
-	if err != nil {
-		// The token resolved to a tenant a moment ago, so this is a race with its expiry or another
-		// consumer rather than a guess; the answer is the same one either way.
-		writeError(w, http.StatusUnauthorized, "token_unusable", "the enrolment token cannot be used")
-		return nil, false
-	}
-	if token.Bootstrap != requested {
-		// One message whether the token names a different template or none: what to fix is the token,
-		// and naming the template it does carry would tell a token thief what this fleet provisions.
-		writeError(w, http.StatusForbidden, "bootstrap_not_authorised",
-			"this enrolment token does not authorise the bootstrap template "+requested+
-				"; mint a token that names it")
-		return nil, false
-	}
-
-	record, err := tenant.GetTemplateVersion(r.Context(), requested, 0)
-	if errors.Is(err, store.ErrNotFound) {
-		writeError(w, http.StatusConflict, "no_such_template",
-			"the template "+requested+" does not exist in this fleet; nothing was applied and the "+
-				"enrolment was refused rather than continuing as though it had been")
-		return nil, false
-	}
-	if err != nil {
-		slog.Error("could not read a bootstrap template", "error", err, "template", requested)
-		writeError(w, http.StatusInternalServerError, "internal", "could not read the template")
-		return nil, false
-	}
-	// Checked here rather than only where a token is minted, and for the reason the signature below is
-	// checked in both places: a token names a template and never a version, so what "the latest version
-	// of this template" is — and whether the name is still in use at all — is decided now, by this read,
-	// and a template retired during a token's lifetime must not still be handed to a machine. The
-	// refusal is loud, like every other one on this path: the agent fails the enrolment rather than
-	// continuing as though a bootstrap had been applied.
-	archival, err := tenant.GetTemplateArchival(r.Context(), requested)
-	if err != nil {
-		slog.Error("could not read a template's archival", "error", err, "template", requested)
-		writeError(w, http.StatusInternalServerError, "internal", "could not read the template")
-		return nil, false
-	}
-	if archival.Archived() {
-		writeError(w, http.StatusConflict, "archived_template",
-			"the template "+requested+" has been archived in this fleet and is no longer issued at "+
-				"enrolment; nothing was applied and the enrolment was refused rather than continuing "+
-				"as though it had been. Restore the template, or mint a token naming one still in use.")
-		return nil, false
-	}
-
-	if !record.Signed() {
-		writeError(w, http.StatusConflict, "unsigned_template",
-			"the latest version of "+requested+" carries no offline signature, and this control plane "+
-				"cannot produce one: a bootstrap template is signed by a key in the host's own "+
-				"trusted-signers, which this control plane does not hold. Sign it with "+
-				"`hostseal sign-template` and store the signed version.")
-		return nil, false
-	}
-
-	body, err := s.cfg.TemplateKey.Open(record.BodySealed)
-	if err != nil {
-		slog.Error("could not decrypt a stored template; the sealing key does not match the database",
-			"template", record.Name, "version", record.Version, "error", err)
-		writeError(w, http.StatusInternalServerError, "sealed",
-			"the stored template cannot be decrypted on this control plane")
-		return nil, false
-	}
-
-	// Checked again here, and the repetition is the point — the same reason the signature is checked
-	// again a few lines above. A token names a template, never a version, so the row resolved when the
-	// token was minted and the row resolved now are two different reads of "the latest": storing a new
-	// version during a token's lifetime is ordinary, and a check that ran only at mint time would let
-	// that version through. This is where the bytes are actually chosen, so this is where it has to
-	// hold.
-	if !bootstrapDoesNotMintItsOwnToken(w, record.Name, string(body)) {
-		return nil, false
-	}
-
-	return &protocol.Bootstrap{
-		Name:        record.Name,
-		Version:     record.Version,
-		Body:        string(body),
-		Signature:   record.Signature,
-		SignerKeyID: record.SignerKeyID,
-	}, true
 }
 
 // handleHeartbeat records a host's state and decides what to ask for next.

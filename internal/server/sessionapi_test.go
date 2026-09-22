@@ -212,9 +212,8 @@ func TestASignInAttemptIsRateLimited(t *testing.T) {
 // TestGuaranteeAFormOnAnotherOriginCannotSignThisBrowserIn is login CSRF, which is the quiet one.
 //
 // The familiar attack forges a request from a signed-in victim. This one is the mirror: it signs the
-// victim *in*, as the attacker, and lets them work. Every host they enrol afterwards, every template
-// body they paste, every API token they mint goes into the attacker's fleet under the attacker's
-// principal — and the attacker reads it at their leisure. Nothing looks wrong to the victim beyond a
+// victim *in*, as the attacker, and lets them work. Every host they enrol afterwards, every API token
+// they mint goes into the attacker's fleet under the attacker's principal — and the attacker reads it at their leisure. Nothing looks wrong to the victim beyond a
 // name in a toolbar they have no reason to check.
 //
 // It is reachable without JavaScript and without CORS. A form with enctype="text/plain" encodes as

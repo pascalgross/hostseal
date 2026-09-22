@@ -70,8 +70,8 @@ const MaxPasswordLength = 256
 
 // The Argon2id cost parameters, which are RFC 9106's SECOND RECOMMENDED option.
 //
-// Named constants rather than configuration, for the same reason seal.keySize is: there is one right
-// answer for a given year and a knob would only create installations with the wrong one. They are
+// Named constants rather than configuration: there is one right answer for a given year and a knob
+// would only create installations with the wrong one. They are
 // written into every hash this build produces (see HashPassword's encoding), so raising them later
 // applies to new and changed passwords without invalidating anybody's existing one — which is the
 // property that makes it possible to raise them at all.

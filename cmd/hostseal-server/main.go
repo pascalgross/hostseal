@@ -32,7 +32,6 @@ import (
 	"github.com/pascalgross/hostseal/internal/intent"
 	"github.com/pascalgross/hostseal/internal/notify"
 	"github.com/pascalgross/hostseal/internal/onlinekey"
-	"github.com/pascalgross/hostseal/internal/seal"
 	"github.com/pascalgross/hostseal/internal/server"
 	"github.com/pascalgross/hostseal/internal/store"
 )
@@ -214,16 +213,6 @@ func serve(argv []string) int {
 	}
 	slog.Info("routine jobs will be signed by this control plane", "key", online.KeyID())
 
-	// The key that seals template bodies at rest. Beside the CA for the same reason the online key is:
-	// both are things a database backup must not yield, and both are backed up by the same operator
-	// with the same care. Losing it makes every stored template unreadable, which docs/INSTALL.md says
-	// in the section on backing up the CA directory.
-	templateKey, err := seal.Ensure(*caDir)
-	if err != nil {
-		slog.Error("could not prepare the template sealing key", "error", err)
-		return 1
-	}
-
 	// Client certificates require TLS, so a control plane with no certificate cannot serve the agent
 	// protocol at all. Rather than starting something that refuses every agent with a 401, one is
 	// issued from the same private CA — which means an enrolled agent, holding the CA bundle it was
@@ -261,7 +250,6 @@ func serve(argv []string) int {
 		Auth:             provider,
 		Accounts:         accounts,
 		OnlineKey:        online,
-		TemplateKey:      templateKey,
 		HeartbeatSeconds: *heartbeat,
 		TokenTTL:         24 * time.Hour,
 		SMTP:             smtp,

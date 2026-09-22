@@ -27,14 +27,6 @@ const sharedMachineID = "sha256:one-physical-machine"
 // and stay globally unique, which is why the two tenants below have different ones.
 const sharedJobID = "01JSHAREDJOB"
 
-// sharedTemplateName is the template name both tenants choose.
-//
-// Same reasoning as the job id: a template name is typed by an operator, and "standard-server" is
-// exactly what two unrelated customers call their standard server. A leak here would hand one
-// customer's provisioning secrets — enrolment tokens, break-glass credentials — to the other, which is
-// why the probes check whose bytes came back rather than whether any did.
-const sharedTemplateName = "standard-server"
-
 // twoTenants builds two populated tenants against one store, for the isolation tests.
 //
 // They collide everywhere the schema allows a collision — the same job id, the same machine-id hash —
@@ -83,18 +75,6 @@ func twoTenants(t *testing.T, s Store) (alpha, beta Scoped) {
 			ApprovalDistinctOperator: tenant.scoped == alpha,
 		}); err != nil {
 			t.Fatalf("creating a job for %s: %v", tenant.scoped.Tenant(), err)
-		}
-
-		// The same template name in both tenants, with each tenant's identity in the sealed bytes and
-		// the author, so that a listing or a lookup that leaked would return something recognisably not
-		// the caller's own.
-		if _, err := tenant.scoped.CreateTemplateVersion(ctx, TemplateVersion{
-			Name:       sharedTemplateName,
-			BodySealed: []byte("sealed-for-" + string(tenant.scoped.Tenant())),
-			CreatedAt:  time.Now().UTC(),
-			CreatedBy:  "test:" + string(tenant.scoped.Tenant()),
-		}); err != nil {
-			t.Fatalf("creating a template for %s: %v", tenant.scoped.Tenant(), err)
 		}
 
 		// The observability rows, colliding on every identifier the schema lets collide: the same
@@ -207,9 +187,6 @@ const (
 	// that state. Claiming it in the fixture rather than relying on the ClaimJobs probe having run
 	// first is what makes the probe hold in every map order instead of about half of them.
 	betaClaimedJobID = "01JBETACLAIMEDJOB"
-
-	// betaOnlyTemplateName is a template only beta stores, for the lookup that must find nothing.
-	betaOnlyTemplateName = "beta-private"
 
 	// sharedEventID is the inbox event id both tenants hold, because the schema permits it.
 	sharedEventID = "01JSHAREDEVENT"
@@ -629,194 +606,6 @@ func TestGuaranteeOneTenantCannotSeeAnother(t *testing.T) {
 				if live, err := alpha.CountLiveCertificates(ctx, betaHostID, time.Now()); err != nil || live != 0 {
 					t.Fatalf("alpha counts %d certificates for a host belonging to beta (err %v); want 0",
 						live, err)
-				}
-			},
-			"GetEnrollmentToken": func(t *testing.T) {
-				// A token issued by beta must be unusable from alpha — the same one answer unknown,
-				// expired and consumed get, so holding another fleet's token teaches nothing.
-				if _, err := alpha.GetEnrollmentToken(ctx, "hash-"+string(beta.Tenant())); !errors.Is(err, ErrTokenUnusable) {
-					t.Fatalf("alpha read a token issued to beta: %v", err)
-				}
-				token, err := alpha.GetEnrollmentToken(ctx, "hash-"+string(alpha.Tenant()))
-				if err != nil {
-					t.Fatalf("alpha cannot read its own token: %v", err)
-				}
-				if token.Label != string(alpha.Tenant())+"-token" {
-					t.Fatalf("alpha's token lookup returned %+v", token)
-				}
-			},
-			"CreateTemplateVersion": func(t *testing.T) {
-				// Both tenants hold sharedTemplateName at v1. A new version created by alpha must
-				// continue alpha's own numbering and must not supersede what beta's latest resolves to.
-				version, err := alpha.CreateTemplateVersion(ctx, TemplateVersion{
-					Name:       sharedTemplateName,
-					BodySealed: []byte("sealed-for-" + string(alpha.Tenant()) + "-v2"),
-					CreatedAt:  time.Now().UTC(),
-					CreatedBy:  "test:" + string(alpha.Tenant()),
-				})
-				if err != nil {
-					t.Fatalf("alpha creating a second version: %v", err)
-				}
-				if version < 2 {
-					t.Fatalf("alpha's second version was numbered %d", version)
-				}
-				latest, err := beta.GetTemplateVersion(ctx, sharedTemplateName, 0)
-				if err != nil {
-					t.Fatalf("reading beta's latest: %v", err)
-				}
-				if latest.CreatedBy != "test:"+string(beta.Tenant()) {
-					t.Fatalf("beta's latest template was created by %q", latest.CreatedBy)
-				}
-			},
-			"ListTemplates": func(t *testing.T) {
-				templates, err := alpha.ListTemplates(ctx, false)
-				if err != nil {
-					t.Fatalf("listing: %v", err)
-				}
-				var mine bool
-				for _, tpl := range templates {
-					if tpl.CreatedBy == "test:"+string(beta.Tenant()) {
-						t.Errorf("alpha's template listing contains beta's %q", tpl.Name)
-					}
-					if tpl.Name == sharedTemplateName {
-						mine = true
-					}
-				}
-				if !mine {
-					t.Fatalf("alpha's own template is missing from its listing: %+v", templates)
-				}
-			},
-			"ArchiveTemplate": func(t *testing.T) {
-				// Both tenants hold sharedTemplateName. Alpha archiving it must withdraw alpha's name
-				// and leave beta's in use — a withdrawal that crossed the boundary would stop another
-				// fleet's enrolments, which is an outage one customer could inflict on another.
-				if err := alpha.ArchiveTemplate(ctx, TemplateArchival{
-					Name:       sharedTemplateName,
-					ArchivedAt: time.Now().UTC(),
-					ArchivedBy: "test:" + string(alpha.Tenant()),
-				}); err != nil {
-					t.Fatalf("alpha archiving its own template: %v", err)
-				}
-				defer func() {
-					if err := alpha.RestoreTemplate(ctx, sharedTemplateName); err != nil {
-						t.Fatalf("alpha restoring its own template: %v", err)
-					}
-				}()
-
-				archival, err := beta.GetTemplateArchival(ctx, sharedTemplateName)
-				if err != nil {
-					t.Fatalf("reading beta's archival: %v", err)
-				}
-				if archival.Archived() {
-					t.Fatalf("alpha's archival withdrew beta's template: %+v", archival)
-				}
-				// And a name only beta holds cannot be archived by alpha at all, which is the same
-				// answer as a name nobody holds.
-				if err := alpha.ArchiveTemplate(ctx, TemplateArchival{
-					Name:       betaOnlyTemplateName,
-					ArchivedAt: time.Now().UTC(),
-					ArchivedBy: "test:" + string(alpha.Tenant()),
-				}); !errors.Is(err, ErrNotFound) {
-					t.Fatalf("alpha archived a template only beta has: %v", err)
-				}
-			},
-			"RestoreTemplate": func(t *testing.T) {
-				// Beta archives its own; alpha must not be able to put it back. Restoring across the
-				// boundary would return a template to use in a fleet that had deliberately retired it.
-				if err := beta.ArchiveTemplate(ctx, TemplateArchival{
-					Name:       sharedTemplateName,
-					ArchivedAt: time.Now().UTC(),
-					ArchivedBy: "test:" + string(beta.Tenant()),
-				}); err != nil {
-					t.Fatalf("beta archiving its own template: %v", err)
-				}
-				defer func() {
-					if err := beta.RestoreTemplate(ctx, sharedTemplateName); err != nil {
-						t.Fatalf("beta restoring its own template: %v", err)
-					}
-				}()
-
-				// Alpha's name of the same spelling is not archived, so alpha's restore is a conflict
-				// rather than an act on beta's row.
-				if err := alpha.RestoreTemplate(ctx, sharedTemplateName); !errors.Is(err, ErrConflict) {
-					t.Fatalf("alpha's restore of its own live template answered %v", err)
-				}
-				archival, err := beta.GetTemplateArchival(ctx, sharedTemplateName)
-				if err != nil {
-					t.Fatalf("reading beta's archival: %v", err)
-				}
-				if !archival.Archived() {
-					t.Fatal("alpha's restore reached beta's archival")
-				}
-			},
-			"GetTemplateArchival": func(t *testing.T) {
-				// Alpha withdraws its own name and reads it back; beta's identically named template
-				// reads as live. Two fleets retiring on their own schedules is the ordinary case.
-				if err := alpha.ArchiveTemplate(ctx, TemplateArchival{
-					Name:       sharedTemplateName,
-					ArchivedAt: time.Now().UTC(),
-					ArchivedBy: "test:" + string(alpha.Tenant()),
-				}); err != nil {
-					t.Fatalf("alpha archiving its own template: %v", err)
-				}
-				defer func() {
-					if err := alpha.RestoreTemplate(ctx, sharedTemplateName); err != nil {
-						t.Fatalf("alpha restoring its own template: %v", err)
-					}
-				}()
-
-				mine, err := alpha.GetTemplateArchival(ctx, sharedTemplateName)
-				if err != nil {
-					t.Fatalf("alpha cannot read its own archival: %v", err)
-				}
-				if mine.ArchivedBy != "test:"+string(alpha.Tenant()) {
-					t.Fatalf("alpha read an archival made by %q", mine.ArchivedBy)
-				}
-				theirs, err := beta.GetTemplateArchival(ctx, sharedTemplateName)
-				if err != nil {
-					t.Fatalf("beta cannot read its own archival: %v", err)
-				}
-				if theirs.Archived() {
-					t.Fatalf("beta's template reads as archived by alpha's act: %+v", theirs)
-				}
-			},
-			"GetTemplateVersion": func(t *testing.T) {
-				// The colliding name must resolve to the caller's own bytes.
-				tpl, err := alpha.GetTemplateVersion(ctx, sharedTemplateName, 1)
-				if err != nil {
-					t.Fatalf("alpha cannot read its own template: %v", err)
-				}
-				if string(tpl.BodySealed) != "sealed-for-"+string(alpha.Tenant()) {
-					t.Fatalf("alpha read template bytes %q, which are not its own", tpl.BodySealed)
-				}
-				// And a name only beta holds is nothing rather than beta's.
-				if _, err := alpha.GetTemplateVersion(ctx, betaOnlyTemplateName, 0); !errors.Is(err, ErrNotFound) {
-					t.Fatalf("alpha read a template only beta has: %v", err)
-				}
-			},
-			"ListTemplateVersions": func(t *testing.T) {
-				// A name both tenants hold must enumerate only the caller's own revisions, and one
-				// only beta holds must be indistinguishable from a name nobody holds. The second half
-				// is the one that matters: an operator who could learn that another tenant has a
-				// template called "standard-server" has learned something about their fleet.
-				revisions, err := alpha.ListTemplateVersions(ctx, sharedTemplateName)
-				if err != nil {
-					t.Fatalf("alpha cannot list its own template's versions: %v", err)
-				}
-				// Whose revisions, not how many. The probes share one pair of tenants and run in map
-				// order, so the CreateTemplateVersion probe may already have added a second revision —
-				// asserting a count here would pass or fail depending on which ran first, which is the
-				// flake that gets a real isolation failure dismissed as noise.
-				if len(revisions) == 0 {
-					t.Fatal("alpha sees none of its own revisions")
-				}
-				for _, rev := range revisions {
-					if rev.CreatedBy != "test:"+string(alpha.Tenant()) {
-						t.Fatalf("alpha sees a revision authored by %q, which is not its own", rev.CreatedBy)
-					}
-				}
-				if _, err := alpha.ListTemplateVersions(ctx, betaOnlyTemplateName); !errors.Is(err, ErrNotFound) {
-					t.Fatalf("alpha enumerated a template only beta has: %v", err)
 				}
 			},
 			"RecordEvent": func(t *testing.T) {
@@ -1400,16 +1189,6 @@ func TestGuaranteeOneTenantCannotSeeAnother(t *testing.T) {
 			t.Fatalf("creating beta's private job: %v", err)
 		}
 
-		// A template only beta stores, for the GetTemplateVersion probe's negative half.
-		if _, err := beta.CreateTemplateVersion(ctx, TemplateVersion{
-			Name:       betaOnlyTemplateName,
-			BodySealed: []byte("sealed-only-for-beta"),
-			CreatedAt:  time.Now().UTC(),
-			CreatedBy:  "test:beta",
-		}); err != nil {
-			t.Fatalf("creating beta's private template: %v", err)
-		}
-
 		// A rule only beta holds, for the delete and state probes that must miss it.
 		if err := beta.CreateAlertRule(ctx, AlertRule{
 			ID: betaOnlyRuleID, Condition: ConditionUnitFailed, Enabled: true,
@@ -1574,23 +1353,8 @@ func TestGuaranteeRowLevelSecurityIsTheRuleNotThePredicate(t *testing.T) {
 		}
 	}
 
-	// Both fleets retire their identically named template, so the archival table holds a row on each
-	// side of the boundary swept below. Which templates a fleet has withdrawn is a statement about its
-	// provisioning, and a policy that let one fleet read or clear another's would be an outage one
-	// customer could inflict on another without touching a single host.
-	for _, tenant := range []Scoped{alpha, beta} {
-		if err := tenant.ArchiveTemplate(ctx, TemplateArchival{
-			Name:       sharedTemplateName,
-			ArchivedAt: time.Now().UTC(),
-			ArchivedBy: "test:" + string(tenant.Tenant()),
-		}); err != nil {
-			t.Fatalf("archiving a template for %s: %v", tenant.Tenant(), err)
-		}
-	}
-
 	for _, table := range []string{"hosts", "jobs", "certificates", "enrollment_tokens", "job_results",
-		"templates", "template_archivals", "events", "unit_transitions", "alert_rules", "alert_states",
-		"wallboard_shares"} {
+		"events", "unit_transitions", "alert_rules", "alert_states", "wallboard_shares"} {
 		t.Run(table, func(t *testing.T) {
 			// No tenant set at all. Fail closed: current_setting(…, true) is NULL when unset, and
 			// `tenant_id = NULL` is NULL rather than true, so the policy admits nothing.
@@ -1745,9 +1509,6 @@ func TestGuaranteeDeletingATenantLeavesNothingBehind(t *testing.T) {
 		if tokens, err := alpha.ListEnrollmentTokens(ctx); err != nil || len(tokens) != 0 {
 			t.Errorf("a deleted tenant lists %d token(s): %v", len(tokens), err)
 		}
-		if _, err := alpha.GetTemplateVersion(ctx, sharedTemplateName, 0); !errors.Is(err, ErrNotFound) {
-			t.Errorf("a deleted tenant's template is still readable: %v", err)
-		}
 
 		// The published wallboard link, which is the row a stranger would still be holding: a live URL
 		// into a fleet that no longer exists, on a screen nobody has thought about since the customer
@@ -1771,9 +1532,6 @@ func TestGuaranteeDeletingATenantLeavesNothingBehind(t *testing.T) {
 		// too enthusiastic rather than too timid.
 		if _, err := beta.GetHost(ctx, betaHostID); err != nil {
 			t.Errorf("deleting alpha removed beta's host: %v", err)
-		}
-		if _, err := beta.GetTemplateVersion(ctx, sharedTemplateName, 0); err != nil {
-			t.Errorf("deleting alpha removed beta's template: %v", err)
 		}
 		if _, err := beta.GetJob(ctx, sharedJobID); err != nil {
 			t.Errorf("deleting alpha removed beta's job: %v", err)

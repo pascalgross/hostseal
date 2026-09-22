@@ -2,10 +2,10 @@
 // interface asks for a signature.
 //
 // It exists for one shape of operator: a person whose workstation is a Windows laptop, whose signing
-// key is on a YubiKey, and whose fleet is Ubuntu. Before it, signing a bootstrap template meant
-// `hostseal sign-template` in a terminal, copying a JSON document out of it and posting that document
-// to the control plane by hand. Nothing was wrong with that and nothing about it has been taken away —
-// this is the same act with the copying removed.
+// key is on a YubiKey, and whose fleet is Ubuntu. Before it, signing a destructive job meant
+// `hostseal sign` in a terminal, copying a JSON document out of it and pasting that document into the
+// web interface by hand. Nothing was wrong with that and nothing about it has been taken away — this is
+// the same act with the copying removed.
 //
 // What it must not become is the thing HostSeal does not have. So the arrangement is stated here, in
 // the package that would be the place to weaken it:
@@ -13,19 +13,19 @@
 //   - The private key never leaves the token, and never reaches the browser or the control plane. This
 //     process holds a PKCS#11 session; what crosses to the browser is a detached signature, a key id
 //     and an algorithm name.
-//   - **The payload is built here, never received.** A request carries a template's name and body —
-//     the same two fields the signature covers — and this package canonicalises them itself. A service
-//     that signed a digest handed to it by a web page would let a compromised control plane display
-//     one template in the browser and have a different one signed, which is precisely the property
-//     `hostseal sign` was built to refuse (docs/PROTOCOL.md §8). That is why there is no `payload`
-//     field and why an unknown field is a refusal rather than something ignored.
+//   - **The payload is built here, never received.** A request carries a host, an intent and its
+//     parameters — what the job is about — and this package assembles and canonicalises the signed
+//     job itself. A service that signed a digest handed to it by a web page would let a compromised
+//     control plane display one operation in the browser and have a different one signed, which is
+//     precisely the property `hostseal sign` was built to refuse (docs/PROTOCOL.md §8). That is why
+//     there is no `payload` field and why an unknown field is a refusal rather than something ignored.
 //   - **The terminal is the display that counts.** Every signature is confirmed by a human, on the
-//     machine holding the token, against the full body printed there. A browser showing one thing and
-//     the terminal another is a disagreement the operator can see and refuse — which is the whole
+//     machine holding the token, against the decoded job printed there. A browser showing one thing
+//     and the terminal another is a disagreement the operator can see and refuse — which is the whole
 //     value of the confirmation being here rather than in the page that asked.
 //   - The control plane learns nothing new. It stores the signature it is given, exactly as it does
-//     for one produced by `hostseal sign-template`, and it still cannot mint one. A host still
-//     verifies against its own /etc/hostseal/trusted-signers, and this changes nothing about that.
+//     for one produced by `hostseal sign`, and it still cannot mint one. A host still verifies against
+//     its own /etc/hostseal/trusted-signers, and this changes nothing about that.
 //
 // The listener is loopback-only and its callers are named: a browser origin has to be on a list the
 // operator typed, and the Host header has to be a loopback literal, which is what keeps a page that
@@ -37,7 +37,6 @@ package localsign
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -53,7 +52,6 @@ import (
 	"github.com/pascalgross/hostseal/internal/canonical"
 	"github.com/pascalgross/hostseal/internal/intent"
 	"github.com/pascalgross/hostseal/internal/protocol"
-	"github.com/pascalgross/hostseal/internal/provision"
 	"github.com/pascalgross/hostseal/internal/signing"
 	"github.com/pascalgross/hostseal/internal/signjob"
 )
@@ -69,9 +67,6 @@ const DefaultAddr = "127.0.0.1:18515"
 // StatusPath answers "is a signer running, and whose key is in it".
 const StatusPath = "/v1/signer"
 
-// SignTemplatePath takes a template's name and body and returns a detached signature over them.
-const SignTemplatePath = "/v1/sign-template"
-
 // SignJobPath takes a host, an intent and its parameters and returns a signed job request.
 const SignJobPath = "/v1/sign-job"
 
@@ -86,9 +81,9 @@ const MaxJobValidity = 24 * time.Hour
 
 // MaxRequestBytes bounds a request body before it is in memory.
 //
-// The template body inside it is bounded to provision.MaxBodyBytes by the control plane and again
-// here; this leaves room for the JSON encoding around it and is the same number the control plane's
-// own template endpoint uses, so a body that fits one fits the other.
+// A job request is a host id, an intent name and a small parameter object, so this is generous by
+// orders of magnitude; it is a bound on what an allowlisted page can make this process hold in memory
+// before the decoder has looked at a byte, not a statement about what a request should be.
 const MaxRequestBytes = 256 << 10
 
 // DefaultSignTimeout bounds one call into the signing backend, after the confirmation.
@@ -106,7 +101,7 @@ const DefaultSignTimeout = 2 * time.Minute
 // It exists because this process holds a logged-in token session, and a session nobody is using is a
 // signing oracle with a confirmation in front of it rather than nothing at all. Exiting is the honest
 // end state: the operator started it for a task, the task is over, and starting it again is one
-// command. Half an hour is long enough to cover writing a template between two signatures.
+// command. Half an hour is long enough to cover deciding on the next job between two signatures.
 const DefaultIdleTimeout = 30 * time.Minute
 
 // ErrIdle reports that the service shut down because nothing asked it for anything.
@@ -115,32 +110,11 @@ const DefaultIdleTimeout = 30 * time.Minute
 // vanished from a terminal without a sentence is one an operator assumes crashed.
 var ErrIdle = errors.New("localsign: no request within the idle timeout")
 
-// Request is what the operator is asked to confirm.
+// JobConfirmation is what the operator is asked to confirm.
 //
-// The origin travels with the template because it is half of the question. "Sign this template" and
-// "sign this template, asked for by https://hostseal.example.org" are different questions, and the
-// second is the one somebody can answer wrongly and notice.
-type Request struct {
-	// Name is the template name the signature will cover.
-	Name string
-
-	// Body is the cloud-init user-data the signature will cover, verbatim.
-	Body string
-
-	// Origin is the browser origin that asked, exactly as it arrived.
-	Origin string
-}
-
-// ConfirmFunc asks a human on this machine whether to sign, and reports their answer.
-//
-// It is a function rather than a terminal prompt written into this package for two reasons. The
-// property worth testing is that nothing is signed without a yes, and a package that read a terminal
-// could only be tested by pretending to be one. And the confirmation is where the operator reads the
-// body: how that is rendered belongs to the command that already renders it for `hostseal
-// sign-template`, so that the two cannot drift into showing different things.
-type ConfirmFunc func(Request) (bool, error)
-
-// JobConfirmation is what the operator is asked about a destructive job.
+// The origin travels with the job because it is half of the question. "Sign this job" and "sign this
+// job, asked for by https://hostseal.example.org" are different questions, and the second is the one
+// somebody can answer wrongly and notice.
 //
 // It carries the assembled job rather than the request, because the identifier, the nonce and the
 // window are the signer's own and are part of what the person is authorising. The decoded parameters
@@ -167,12 +141,13 @@ type JobConfirmation struct {
 	Payload []byte
 }
 
-// ConfirmJobFunc asks a human on this machine whether to sign a job.
+// ConfirmJobFunc asks a human on this machine whether to sign a job, and reports their answer.
 //
-// Separate from ConfirmFunc rather than one function over a union, because the two questions are not
-// the same question: a template is a document that will be applied once at enrolment, and a job is an
-// operation on a named running host, now. The screens an operator reads for them are different, and a
-// single callback would have had to begin by deciding which of two things it was being asked.
+// It is a function rather than a terminal prompt written into this package for two reasons. The
+// property worth testing is that nothing is signed without a yes, and a package that read a terminal
+// could only be tested by pretending to be one. And the confirmation is where the operator reads the
+// job: how that is rendered belongs to the command that already renders it for `hostseal sign`, so
+// that the two cannot drift into showing different things.
 type ConfirmJobFunc func(JobConfirmation) (bool, error)
 
 // Options configures a service.
@@ -184,11 +159,8 @@ type Options struct {
 	// Origins are the browser origins allowed to ask. Required, and never a wildcard.
 	Origins []string
 
-	// Confirm asks the human about a template. Required: a service that could be constructed without
+	// ConfirmJob asks the human about a job. Required: a service that could be constructed without
 	// one would be one signature away from a signing oracle.
-	Confirm ConfirmFunc
-
-	// ConfirmJob asks the human about a job. Required for the same reason.
 	ConfirmJob ConfirmJobFunc
 
 	// SignTimeout bounds one backend call, defaulted to DefaultSignTimeout.
@@ -210,9 +182,6 @@ type Service struct {
 	// origins is the allowlist, as an exact-match set: an origin is a string comparison by
 	// specification, and anything cleverer here is a way of accidentally allowing a substring.
 	origins map[string]bool
-
-	// confirm asks the human about a template.
-	confirm ConfirmFunc
 
 	// confirmJob asks the human about a job.
 	confirmJob ConfirmJobFunc
@@ -259,9 +228,9 @@ func New(opts Options) (*Service, error) {
 	if opts.Signer == nil {
 		return nil, errors.New("localsign: a signer is required")
 	}
-	if opts.Confirm == nil || opts.ConfirmJob == nil {
-		return nil, errors.New("localsign: a confirmation function is required for both templates " +
-			"and jobs; a signing service nobody has to answer to is a signing oracle")
+	if opts.ConfirmJob == nil {
+		return nil, errors.New("localsign: a confirmation function is required; " +
+			"a signing service nobody has to answer to is a signing oracle")
 	}
 	if len(opts.Origins) == 0 {
 		return nil, errors.New("localsign: at least one --origin is required. It is the address of " +
@@ -287,7 +256,6 @@ func New(opts Options) (*Service, error) {
 	s := &Service{
 		signer:      opts.Signer,
 		origins:     origins,
-		confirm:     opts.Confirm,
 		confirmJob:  opts.ConfirmJob,
 		signTimeout: timeout,
 		log:         log,
@@ -307,8 +275,6 @@ func (s *Service) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET "+StatusPath, s.handleStatus)
 	mux.HandleFunc("OPTIONS "+StatusPath, s.handlePreflight)
-	mux.HandleFunc("POST "+SignTemplatePath, s.handleSignTemplate)
-	mux.HandleFunc("OPTIONS "+SignTemplatePath, s.handlePreflight)
 	mux.HandleFunc("POST "+SignJobPath, s.handleSignJob)
 	mux.HandleFunc("OPTIONS "+SignJobPath, s.handlePreflight)
 	return s.guard(mux)
@@ -427,8 +393,8 @@ func (s *Service) Address(ctx context.Context) (string, error) {
 func (s *Service) guard(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Every response varies by origin, including the refusals: a cache that kept one origin's
-		// answer for another would make this allowlist meaningless. no-store for the same reason it is
-		// on the control plane's template responses — a template body is in these requests.
+		// answer for another would make this allowlist meaningless. no-store because a signature is a
+		// credential, and a cached copy of one is a copy nobody is watching.
 		w.Header().Set("Vary", "Origin")
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
@@ -503,8 +469,8 @@ type statusResponse struct {
 	// TrustedSignerLine is the line to paste into a host's /etc/hostseal/trusted-signers.
 	//
 	// A public key, and the one thing an operator needs that neither the browser nor the control plane
-	// can produce: a template signed by a key no host trusts is a template every enrolment refuses,
-	// and the remedy is this line on the hosts that key may act on.
+	// can produce: a job signed by a key no host trusts is a job every host refuses, and the remedy
+	// is this line on the hosts that key may act on.
 	TrustedSignerLine string `json:"trustedSignerLine"`
 }
 
@@ -526,148 +492,6 @@ func (s *Service) handleStatus(w http.ResponseWriter, _ *http.Request) {
 		Algorithm:         string(s.signer.Algorithm()),
 		Backend:           s.signer.Backend(),
 		TrustedSignerLine: line,
-	})
-}
-
-// signTemplateRequest is the body of POST /v1/sign-template.
-//
-// Two fields, and they are the two the signature covers. There is deliberately no payload, no digest
-// and no key reference: the first two would let the caller choose what is signed, and the third would
-// let a web page choose which shared library this process loads.
-type signTemplateRequest struct {
-	// Name is the template name, as it will be stored and as an operator will type it after
-	// --bootstrap.
-	Name string `json:"name"`
-
-	// Body is the cloud-init user-data, verbatim.
-	Body string `json:"body"`
-}
-
-// signTemplateResponse is what the browser stores as a new template version.
-//
-// The field names are the control plane's own — POST /api/v1/templates takes exactly these three
-// beside the name and body — so the page forwards what it was given rather than rearranging it.
-type signTemplateResponse struct {
-	// Name echoes the template that was signed, so a caller can check it is about what it asked.
-	Name string `json:"name"`
-
-	// Signature is the detached signature, base64.
-	Signature string `json:"signature"`
-
-	// SignerKeyID names the key that made it.
-	SignerKeyID string `json:"signerKeyId"`
-
-	// SignerAlgorithm is "ed25519" or "ecdsa-p256".
-	SignerAlgorithm string `json:"signerAlgorithm"`
-}
-
-// handleSignTemplate confirms with a human and signs a bootstrap template.
-func (s *Service) handleSignTemplate(w http.ResponseWriter, r *http.Request) {
-	if ct := r.Header.Get("Content-Type"); !isJSON(ct) {
-		// Refused rather than sniffed, and the refusal is load-bearing: a content type of
-		// application/json is one a browser cannot send from a plain HTML form, so requiring it means
-		// every cross-origin request here has been through a preflight and past the allowlist above.
-		writeError(w, http.StatusUnsupportedMediaType, "not_json",
-			"this endpoint takes application/json")
-		return
-	}
-
-	var req signTemplateRequest
-	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, MaxRequestBytes))
-	// An unknown field is a refusal, which is unusual for this project and deliberate here. The fields
-	// this endpoint takes are the ones the signature covers; a request carrying a `payload`, a `digest`
-	// or a `key` is either a caller trying to choose what gets signed or a client this service does not
-	// understand, and silently ignoring the extra field would sign something the caller did not think
-	// it had asked for.
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "malformed",
-			"this request is not a {\"name\": ..., \"body\": ...} object: "+err.Error()+
-				". This signer builds the signed payload itself from the name and the body; it does "+
-				"not accept a payload or a digest, because then the caller would choose what is signed.")
-		return
-	}
-	if !provision.ValidName(req.Name) {
-		writeError(w, http.StatusBadRequest, "malformed",
-			"a template name is "+provision.NameShape+"; it is typed on an enrolment command line "+
-				"and recorded permanently on hosts")
-		return
-	}
-	if req.Body == "" || len(req.Body) > provision.MaxBodyBytes {
-		writeError(w, http.StatusBadRequest, "malformed",
-			fmt.Sprintf("a template body is between 1 and %d bytes", provision.MaxBodyBytes))
-		return
-	}
-
-	select {
-	case s.inFlight <- struct{}{}:
-		defer func() { <-s.inFlight }()
-	default:
-		writeError(w, http.StatusConflict, "busy",
-			"this signer is already waiting for somebody to confirm a signature at its terminal. "+
-				"Answer that one first; two prompts cannot share one terminal.")
-		return
-	}
-
-	// Built here, from the two fields above, and never received. This is the line the package comment
-	// is about: what is signed is what this process constructed out of a name and a body it can show
-	// to a human, not something a web page computed.
-	bootstrap := protocol.Bootstrap{Name: req.Name, Body: req.Body}
-	payload, err := canonical.Marshal(bootstrap.SignedPayload())
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal",
-			"this template cannot be canonicalised: "+err.Error())
-		return
-	}
-
-	// Straight to the confirmation, with no log line of its own before it: the confirmation renders
-	// the request in full, including the origin, and a summary printed immediately above the thing it
-	// summarises is two chances to read the same sentence rather than one chance to read the body.
-	origin := r.Header.Get("Origin")
-	confirmed, err := s.confirm(Request{Name: req.Name, Body: req.Body, Origin: origin})
-	if err != nil {
-		s.logf("Could not ask: %v. Nothing was signed.\n", err)
-		writeError(w, http.StatusInternalServerError, "no_confirmation",
-			"this signer could not ask anybody on this machine whether to sign: "+err.Error())
-		return
-	}
-	if !confirmed {
-		s.logf("Declined at this terminal. Nothing was signed.\n")
-		writeError(w, http.StatusForbidden, "declined",
-			"the signature was declined at the signer's own terminal.")
-		return
-	}
-
-	// After the confirmation rather than around it: the prompt is a person reading a template, and a
-	// deadline that covered it would refuse to sign for anybody who read it carefully. Derived from the
-	// request so that a browser that has gone away stops the wait rather than spending a token touch
-	// nobody is there to receive.
-	signCtx, done := context.WithTimeout(r.Context(), s.signTimeout)
-	defer done()
-	signature, err := s.signer.Sign(signCtx, payload)
-	if err != nil {
-		s.logf("Signing failed: %v\n", err)
-		writeError(w, http.StatusInternalServerError, "sign_failed", "signing failed: "+err.Error())
-		return
-	}
-	// The same self-check `hostseal sign` runs, and for the same reason: a token that returns ECDSA as
-	// a raw r‖s pair produces a signature every host refuses as coming from no trusted signer, days
-	// later, on machines nobody can easily inspect. Here it is an error in a browser, now.
-	if err := signing.SelfCheck(s.signer, payload, signature); err != nil {
-		s.logf("%v\n", err)
-		writeError(w, http.StatusInternalServerError, "self_check", err.Error())
-		return
-	}
-
-	s.logf("Signed %q with %s (%s). The template is stored by the browser that asked; "+
-		"a host will apply it only if %s is in its own %s.\n",
-		req.Name, s.signer.KeyID(), s.signer.Algorithm(), s.signer.KeyID(), signing.TrustedSignersPath)
-
-	writeJSON(w, http.StatusOK, signTemplateResponse{
-		Name:            req.Name,
-		Signature:       base64.StdEncoding.EncodeToString(signature),
-		SignerKeyID:     s.signer.KeyID(),
-		SignerAlgorithm: string(s.signer.Algorithm()),
 	})
 }
 

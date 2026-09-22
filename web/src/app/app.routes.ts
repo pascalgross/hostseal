@@ -63,12 +63,6 @@ export const routes: Routes = [
   },
   {
     canMatch: [notPlatform],
-    path: 'templates',
-    loadComponent: () => import('./templates/templates-page').then((m) => m.TemplatesPage),
-    title: 'Templates — HostSeal',
-  },
-  {
-    canMatch: [notPlatform],
     path: 'wallboard',
     loadComponent: () => import('./wallboard/wallboard').then((m) => m.Wallboard),
     title: 'Wallboard — HostSeal',

@@ -44,16 +44,6 @@ const enrollmentTokenBytes = 32
 // tooling can recognise when it turns up somewhere it should not be.
 const enrollmentTokenPrefix = "hsl_"
 
-// EnrollmentTokenStandIn returns a value the exact length of a real token, and no use as one.
-//
-// It exists for the render rehearsal in templatesapi.go, which proves a template will render before a
-// live credential is minted for it. The length has to match: the rendered-size bound in
-// internal/provision is arithmetic over what is substituted, so a shorter stand-in would let a render
-// pass its rehearsal, mint a token nobody will ever be shown, and only then hit the bound.
-func EnrollmentTokenStandIn() string {
-	return enrollmentTokenPrefix + strings.Repeat("0", id.Encoding.EncodedLen(enrollmentTokenBytes))
-}
-
 // HashToken returns the stored form of a bootstrap token.
 //
 // SHA-256 with no salt and no stretching is correct here and would not be for a password: the token is

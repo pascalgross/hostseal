@@ -50,13 +50,7 @@ Back up `ca.key` **separately from the database**. An attacker with both can imp
 control plane; an attacker with the database alone cannot. Neither lets them run code on a host: an
 agent authorises a job by its class and its signature, not by who asked.
 
-Back up `template.key` beside it, from the same directory, and treat it as part of the backup rather
-than as part of the database. It encrypts provisioning template bodies at rest — which is why a database
-dump is not a set of provisioning scripts — and a restore without it leaves every stored template
-permanently unopenable. The control plane says exactly that when it happens, which is the difference
-between an operator fixing their restore and filing a bug about templates being corrupt.
-
-The third key in that directory asks nothing of you. `online.key` is generated on first start, and it
+The other key in that directory asks nothing of you. `online.key` is generated on first start, and it
 signs the one privileged operation that carries no offline signature: `packages.applySecurity`. There is
 no command that creates it and nothing to distribute — its public half reaches agents in the enrolment
 response and on every heartbeat, so rotating it is deleting the file and restarting: hosts pick the new
@@ -302,11 +296,8 @@ values and the reasoning are in [`SECURITY.md` §3](SECURITY.md#3-the-intent-cat
 
 The interface has this as a panel: **Fleet → Add a host** mints the token, fills in this control plane's
 own address and gives you the three commands with a copy button on each. The label, the group and the
-lifetime are fields beside the button, each optional. The token button opens onto the signed templates,
-so **Generate token for …** mints one that names a bootstrap template, and the enrolment command then
-carries `--signers` and `--bootstrap` together — see
-[`SECURITY.md` §7](SECURITY.md#7-provisioning-and-the-enrolment-time-exception) for what the host does
-with them. Under the steps, the panel lists every token minted in the fleet — never the values, which
+lifetime are fields beside the button, each optional. Under the steps, the panel lists every token
+minted in the fleet — never the values, which
 are not stored — with whether each is open, was spent and by which host, or expired unused. What
 follows is the same thing for a script, and the same thing to read when you want to know what those
 commands do.
@@ -630,7 +621,7 @@ host apply security updates sooner than its own timer would have.
 ### The operator's CLI
 
 `hostseal` is the one binary that runs on **your** machine rather than on a managed host. It enrols
-hosts, generates and inspects signing keys, signs jobs and templates offline, and answers the web
+hosts, generates and inspects signing keys, signs jobs offline, and answers the web
 interface over loopback. It is also the only binary in HostSeal that links a signing backend — a
 PKCS#11 module, a cloud KMS — which is why no agent, helper or server does, and why a host cannot tell
 which kind of key signed the job it is verifying.
@@ -702,8 +693,8 @@ hostseal signer \
 ```
 
 It asks for the token's PIN once, prints the `trusted-signers` line for the key it found, and listens
-on `127.0.0.1:18515` — loopback only, and only for the origins you named. The Jobs and Templates pages
-then offer **Sign with your token**: the browser sends what you filled in, the signer decodes it
+on `127.0.0.1:18515` — loopback only, and only for the origins you named. The Jobs page then offers
+**Sign with your token**: the browser sends what you filled in, the signer decodes it
 against its own copy of the catalogue, prints what it means in *its* terminal, and waits for you to
 answer and to touch the key. What comes back is a signature; what never moves is the key.
 
@@ -751,27 +742,20 @@ would be a flag that signs without asking, which is the signing oracle this whol
 refuse. On Linux `--install` refuses for the same reason: a systemd user unit has no terminal either.
 
 For an operator without a signer running, the Jobs page prints the `hostseal sign` command for what
-they filled in and takes the signed document back by paste, and a template's Signature card does the
-same with `hostseal sign-template`: it offers the version's body as a file, prints the command, and
-stores what the command printed as the next version. Same signature, two more steps.
+they filled in and takes the signed document back by paste. Same signature, two more steps.
 
-Nothing about the trust model changes: a host applies what a key signed only if that key's line is in
+Nothing about the trust model changes: a host acts on what a key signed only if that key's line is in
 its own `/etc/hostseal/trusted-signers`, which the control plane cannot write and this signer cannot
-write either. Paste the line it prints onto the hosts that key may act on, by hand, deliberately — and
-for a bootstrap template, the host establishes that anchor from your own file before it fetches
-anything:
+write either. Paste the line it prints onto the hosts that key may act on, by hand, deliberately — or
+hand it to `hostseal enroll --signers` when the host is enrolled, which installs the file before
+anything is fetched from the control plane:
 
 ```bash
 sudo hostseal enroll \
   --server https://agents.hostseal.example.org \
   --token "$HOSTSEAL_TOKEN" \
-  --signers ./trusted-signers \
-  --bootstrap hostseal-baseline
+  --signers ./trusted-signers
 ```
-
-`--bootstrap` refuses without `--signers`, and never falls back to trusting the server: the template
-is verified against the key in the file you just installed, printed in full, and recorded before a byte
-of it runs. See [`SECURITY.md` §7](SECURITY.md#7-provisioning-and-the-enrolment-time-exception).
 
 ## What a fresh host will and will not do
 

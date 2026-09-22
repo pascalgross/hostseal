@@ -94,8 +94,7 @@ to misconfigure.
   "csr": "-----BEGIN CERTIFICATE REQUEST-----\n...",
   "hostname": "web-01",
   "machineIdHash": "sha256:9f2c...",
-  "agentVersion": "0.1.0",
-  "requestedBootstrap": "standard-server"
+  "agentVersion": "0.1.0"
 }
 ```
 
@@ -109,9 +108,6 @@ keeps its row and its history, so releasing the machine does not cost the audit 
 record the host and its first certificate atomically — a host row whose certificate failed to record
 would hold the claim while being unable to authenticate, wedging that machine permanently.
 
-`requestedBootstrap` is present only when the operator passed `--bootstrap NAME`, and is subject to
-every guardrail in [`SECURITY.md` §7](SECURITY.md#7-provisioning-and-the-enrolment-time-exception).
-
 ### Response `200`
 
 ```json
@@ -120,49 +116,14 @@ every guardrail in [`SECURITY.md` §7](SECURITY.md#7-provisioning-and-the-enrolm
   "certificate": "-----BEGIN CERTIFICATE-----\n...",
   "caBundle": "-----BEGIN CERTIFICATE-----\n...",
   "serverTime": "2026-08-22T14:00:00Z",
-  "nextHeartbeatSeconds": 60,
-  "bootstrap": {
-    "name": "standard-server",
-    "version": 3,
-    "body": "#cloud-config\n...",
-    "signature": "base64...",
-    "signerKeyId": "ops-yubikey-1"
-  }
+  "nextHeartbeatSeconds": 60
 }
 ```
 
 `hostId` is letters and digits only, at most 64 of them. An agent MUST check it rather than assume it,
-and HostSeal's does: the id is interpolated into cloud-init's `meta-data` when `--bootstrap` was
-requested, which is a YAML document cloud-init parses and acts on, so an id carrying a newline would add
-keys to that document — `public-keys` among them — beside a template the operator did approve.
-
-`bootstrap` is present only if it was requested. `signature` covers the canonical encoding of
-
-```json
-{"body":"…","name":"…"}
-```
-
-(keys in canonical order, per [§8](#8-canonical-json)). The name is covered as well as the body: signing
-the body alone would let a compromised control plane return a genuinely signed template that the
-operator did not name. `version` is informational and deliberately outside the signed payload — the
-record on the host keeps the body verbatim, so what ran stays knowable from the host alone even if a
-control plane relabelled its version numbers. The server issues a template only when the enrolment
-token was minted naming it, and refuses the enrolment — before consuming the token — when the named
-template is missing, unsigned, or archived, because an agent that asked and silently received nothing
-must not proceed as though something had been applied. Archived means withdrawn from use by an
-operator of that fleet: a template is never deleted, because the record this response leaves on the
-host names a version, so retiring one stops it being issued and leaves every version readable.
-
-The agent MUST verify the signature against a key present in the host's **existing**
-`/etc/hostseal/trusted-signers` before doing anything with `body`; MUST refuse if `name` is not the name
-the operator asked for; MUST print the template and record it to journald and
-`/var/lib/hostseal/bootstrap-applied.json` before executing it; and MUST refuse entirely if
-`trusted-signers` is empty. It MUST NOT fall back to trusting the server.
-
-The body is printed **escaped**, not raw. It comes from the control plane, and a raw body can carry
-terminal control sequences that scroll the real content out of view, or a line that reproduces the
-end-of-template marker followed by something else — so that the operator reads one template and
-approves another.
+and HostSeal's does: the id is written into the agent's state file, into its log lines and into every
+result it reports, and a value the control plane chose that carried a newline or a control character
+would be adding lines to those documents rather than filling in one field.
 
 ### Errors
 
@@ -171,7 +132,7 @@ approves another.
 | `400` | Malformed body or CSR |
 | `401` | Token unknown, expired, or already used |
 | `403` | `host_limit_reached` — the fleet is at its host limit; `tenant_suspended` — the fleet is suspended. Neither consumes the token, with one exception: when two machines contend for a fleet's last slot the loser is refused by the atomic check, which happens after redemption, and its message says the token was spent |
-| `409` | A host with this `machineIdHash` is already enrolled; or the requested bootstrap cannot be issued — `no_such_template`, `unsigned_template`, `archived_template`. These are checked before the token is consumed, with one exception: a template archived while the enrolment is in flight is caught again after redemption, and its message says the token was spent |
+| `409` | A host with this `machineIdHash` is already enrolled |
 | `429` | Rate limited; honour `Retry-After` |
 
 ## 4. `POST /agent/v1/heartbeat`

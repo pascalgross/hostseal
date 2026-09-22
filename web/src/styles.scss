@@ -97,7 +97,7 @@ body {
 // than drawn outside it. That declaration has a second effect nothing about it suggests: a flex item
 // whose overflow is not `visible` has no automatic minimum size, so the 24px width stops being a
 // floor and becomes a starting point the flex algorithm is free to shrink. Every icon here sits in a
-// flex row beside a sentence — the callouts on Services, Alerts, Jobs and Templates are all one icon
+// flex row beside a sentence — the callouts on Services, Alerts and Jobs are all one icon
 // and one paragraph — and the paragraph's max-content width is a whole sentence on one line, so
 // there is always more to shrink away than the row has room for. The icon collapsed to 10.6px in
 // the Services all-clear and then cropped its own glyph.

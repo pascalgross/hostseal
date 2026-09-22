@@ -69,15 +69,6 @@ const (
 	// Shutdown reboots the host. Reached only from the reboot-host root helper, after policy.
 	Shutdown Program = "/usr/sbin/shutdown"
 
-	// CloudInit applies a verified bootstrap template at enrolment, exactly once.
-	//
-	// This is guardrail 5 of docs/SECURITY.md §7 in one line: cloud-init does the applying, so
-	// HostSeal never grows a hand-written YAML-to-shell engine — which would be the exec channel
-	// wearing a hat. The argument vector is fully fixed by the agent; nothing from a template body
-	// ever reaches a command line, because the body is a *file* cloud-init reads from its seed
-	// directory, not an argument.
-	CloudInit Program = "/usr/bin/cloud-init"
-
 	// UpdateScan reports the updates pending on a Windows host. It does not exist on Linux.
 	//
 	// It is HostSeal's own binary, shipped in the same package as the agent, and it is here for the same
@@ -96,7 +87,7 @@ const (
 // allowed is the run-time allowlist.
 //
 // It is checked on every call, so adding a program means editing this map. A caller that assembles a
-// path from anywhere else — configuration, a job parameter, a template — fails here rather than
+// path from anywhere else — configuration, a job parameter, a response — fails here rather than
 // executing.
 //
 // It holds only programs shipped code actually calls, and TestGuaranteeEveryAllowlistedProgramHasACaller
@@ -110,7 +101,6 @@ var allowed = map[Program]bool{
 	Needrestart:       true,
 	Pro:               true,
 	Shutdown:          true,
-	CloudInit:         true,
 	UpdateScan:        true,
 }
 

@@ -89,10 +89,9 @@ LABEL org.opencontainers.image.title="hostseal-server" \
       org.opencontainers.image.vendor="Pascal Groß" \
       org.opencontainers.image.version="${VERSION}"
 
-# Declared so that a `docker run` without a volume still keeps the CA, the online signing key and the
-# template sealing key out of the container's writable layer. Losing any of them is not recoverable:
-# every enrolled agent verifies this control plane against that CA, and every stored template is
-# encrypted to that key. deploy/compose.yaml names a volume for it explicitly.
+# Declared so that a `docker run` without a volume still keeps the CA and the online signing key out
+# of the container's writable layer. Losing the CA is not recoverable: every enrolled agent verifies
+# this control plane against it. deploy/compose.yaml names a volume for it explicitly.
 VOLUME /var/lib/hostseal-server
 
 USER hostseal

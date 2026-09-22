@@ -15,7 +15,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -51,7 +50,6 @@ usage:
   hostseal key generate  create a signing key and print its trusted-signers line
   hostseal key show      print the trusted-signers line for an existing key
   hostseal sign          render a job request offline and sign it
-  hostseal sign-template sign a provisioning template for the Tier 2 bootstrap
   hostseal signer        serve signatures to the web interface from a token on this machine
   hostseal catalogue     print the intent catalogue this build knows
   hostseal version       print the version
@@ -82,8 +80,6 @@ func main() {
 		}
 	case "sign":
 		os.Exit(signCommand(args[1:]))
-	case "sign-template":
-		os.Exit(signTemplateCommand(args[1:]))
 	case "signer":
 		os.Exit(signerCommand(args[1:]))
 	case "version":
@@ -107,8 +103,6 @@ func enroll(argv []string) int {
 	signers := fs.String("signers", "",
 		"local trusted-signers file to install before anything is fetched")
 	policyFile := fs.String("policy", "", "local policy.toml to install")
-	bootstrap := fs.String("bootstrap", "",
-		"provisioning template to apply once during enrolment; refuses without --signers")
 	hostname := fs.String("hostname", "", "override the reported hostname")
 	if err := fs.Parse(argv); err != nil {
 		return 2
@@ -132,17 +126,10 @@ func enroll(argv []string) int {
 		CABundle:    bundle,
 		SignersFile: *signers,
 		PolicyFile:  *policyFile,
-		Bootstrap:   *bootstrap,
 		Hostname:    *hostname,
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "hostseal: %v\n", err)
-		if errors.Is(err, agent.ErrNoTrustAnchor) {
-			fmt.Fprintln(os.Stderr,
-				"\nThe trust anchor is established from a local file you choose, before anything is\n"+
-					"fetched, so that a bootstrap template can be verified against a key the server did\n"+
-					"not supply. Without that ordering the verification would prove nothing.")
-		}
 		return 1
 	}
 

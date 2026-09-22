@@ -116,57 +116,6 @@ type EnrollRequest struct {
 
 	// AgentVersion is the agent build, so the control plane knows what it is talking to.
 	AgentVersion string `json:"agentVersion"`
-
-	// RequestedBootstrap names a provisioning template, present only when the operator passed
-	// --bootstrap on this specific invocation.
-	RequestedBootstrap string `json:"requestedBootstrap,omitempty"`
-}
-
-// Bootstrap is a provisioning template returned during enrolment.
-//
-// This is the exception named in the second paragraph of the guarantee, and every guardrail in
-// docs/SECURITY.md §7 applies to it: the agent must verify Signature against a key already present in
-// its own trusted-signers, print Body in full and record it before executing, apply it exactly once
-// under an on-disk interlock, and refuse entirely when trusted-signers is empty. It never falls back
-// to trusting the server.
-type Bootstrap struct {
-	// Name is the template's name, as the operator typed it.
-	Name string `json:"name"`
-
-	// Version numbers the stored revision this body came from, for the record written to the host.
-	//
-	// It is informational and deliberately outside the signed payload: the signature covers the name
-	// and the exact bytes of the body, which is what makes a version resolvable afterwards — the
-	// record on the host keeps the body verbatim, so what ran is knowable from the host alone even if
-	// a control plane relabelled its version numbers.
-	Version int `json:"version,omitempty"`
-
-	// Body is the cloud-init user-data, in full. cloud-init does the applying; HostSeal never
-	// interprets this itself, because a hand-written YAML-to-shell engine would be the exec channel
-	// wearing a hat.
-	Body string `json:"body"`
-
-	// Signature is a detached signature over the canonical payload returned by SignedPayload.
-	//
-	// It covers the name as well as the body. Signing the body alone would let a compromised control
-	// plane return a template the operator did not name — genuinely signed, genuinely from a trusted
-	// key, and applied to a host whose operator asked for something else.
-	Signature string `json:"signature"`
-
-	// SignerKeyID names the key that signed it, for the record written to the host.
-	SignerKeyID string `json:"signerKeyId"`
-}
-
-// SignedPayload returns the exact structure a bootstrap template's signature is computed over.
-//
-// It is defined here, in the shared package, so that the agent verifying a signature and the tool
-// producing one cannot construct different bytes from the same template. The signer key id is absent
-// deliberately: it identifies the key that made the signature and cannot also be an input to it.
-func (b Bootstrap) SignedPayload() map[string]any {
-	return map[string]any{
-		"name": b.Name,
-		"body": b.Body,
-	}
 }
 
 // EnrollResponse is the body of a successful enrolment.
@@ -198,9 +147,6 @@ type EnrollResponse struct {
 	// Empty when the control plane has no online key, in which case the agent refuses routine intents
 	// exactly as it did before there was one.
 	OnlineKey string `json:"onlineKey,omitempty"`
-
-	// Bootstrap is present only if one was requested and approved.
-	Bootstrap *Bootstrap `json:"bootstrap,omitempty"`
 }
 
 // HeartbeatRequest is the body of POST /agent/v1/heartbeat.

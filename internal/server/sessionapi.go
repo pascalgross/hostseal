@@ -57,8 +57,8 @@ const (
 // help: it governs whether a cookie is sent, not whether one may be set.
 //
 // The result is login CSRF, which is quieter than it sounds and worse: the victim is signed in as the
-// *attacker*, and every host they enrol, template they paste and token they mint afterwards lands in
-// the attacker's fleet, under the attacker's principal, for the attacker to read later.
+// *attacker*, and every host they enrol and token they mint afterwards lands in the attacker's
+// fleet, under the attacker's principal, for the attacker to read later.
 func (s *Server) handleSignIn(w http.ResponseWriter, r *http.Request) {
 	if s.accounts == nil {
 		// No accounts provider configured. It is 404 rather than 501 because the route genuinely does

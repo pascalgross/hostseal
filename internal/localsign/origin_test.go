@@ -51,7 +51,7 @@ func TestAnOriginThatIsNotOneIsRefused(t *testing.T) {
 		"http://hostseal.example.org",
 		"ftp://hostseal.example.org",
 		"https://",
-		"https://hostseal.example.org/templates",
+		"https://hostseal.example.org/jobs",
 		"https://hostseal.example.org?x=1",
 		"https://user:pass@hostseal.example.org",
 		"hostseal.example.org",

@@ -515,10 +515,9 @@ func (p *Postgres) DeleteTenant(ctx context.Context, id TenantID) error {
 func (s *scopedPostgres) CreateEnrollmentToken(ctx context.Context, t EnrollmentToken) error {
 	return s.withTenant(ctx, "creating an enrolment token", func(tx pgx.Tx) error {
 		_, err := tx.Exec(ctx, `
-			INSERT INTO enrollment_tokens (hash, label, fleet_group, bootstrap, created_at, expires_at,
-			                               tenant_id)
-			VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-			t.Hash, t.Label, t.Group, t.Bootstrap, t.CreatedAt, t.ExpiresAt, string(s.tenant))
+			INSERT INTO enrollment_tokens (hash, label, fleet_group, created_at, expires_at, tenant_id)
+			VALUES ($1, $2, $3, $4, $5, $6)`,
+			t.Hash, t.Label, t.Group, t.CreatedAt, t.ExpiresAt, string(s.tenant))
 		return wrap(err, "creating an enrolment token")
 	})
 }
@@ -541,10 +540,9 @@ func (s *scopedPostgres) ConsumeEnrollmentToken(ctx context.Context, hash, hostI
 			   AND tenant_id = $4
 			   AND consumed_at IS NULL
 			   AND expires_at > $3
-			RETURNING hash, label, fleet_group, bootstrap, created_at, expires_at, consumed_at,
-			          consumed_by_host`,
+			RETURNING hash, label, fleet_group, created_at, expires_at, consumed_at, consumed_by_host`,
 			hash, hostID, now, string(s.tenant),
-		).Scan(&t.Hash, &t.Label, &t.Group, &t.Bootstrap, &t.CreatedAt, &t.ExpiresAt,
+		).Scan(&t.Hash, &t.Label, &t.Group, &t.CreatedAt, &t.ExpiresAt,
 			&t.ConsumedAt, &t.ConsumedByHost)
 		if errors.Is(err, pgx.ErrNoRows) {
 			// Unknown, expired, already consumed and belonging to somebody else all arrive here and all
@@ -565,7 +563,7 @@ func (s *scopedPostgres) ListEnrollmentTokens(ctx context.Context) ([]Enrollment
 	var out []EnrollmentToken
 	err := s.withTenant(ctx, "listing enrolment tokens", func(tx pgx.Tx) error {
 		rows, err := tx.Query(ctx, `
-			SELECT hash, label, fleet_group, bootstrap, created_at, expires_at,
+			SELECT hash, label, fleet_group, created_at, expires_at,
 			       COALESCE(consumed_at, 'epoch'::timestamptz), COALESCE(consumed_by_host, '')
 			  FROM enrollment_tokens
 			 WHERE tenant_id = $1
@@ -577,7 +575,7 @@ func (s *scopedPostgres) ListEnrollmentTokens(ctx context.Context) ([]Enrollment
 
 		for rows.Next() {
 			var t EnrollmentToken
-			if err := rows.Scan(&t.Hash, &t.Label, &t.Group, &t.Bootstrap, &t.CreatedAt, &t.ExpiresAt,
+			if err := rows.Scan(&t.Hash, &t.Label, &t.Group, &t.CreatedAt, &t.ExpiresAt,
 				&t.ConsumedAt, &t.ConsumedByHost); err != nil {
 				return wrap(err, "scanning an enrolment token")
 			}

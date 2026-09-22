@@ -142,29 +142,20 @@ jobs:
           done
 
       - name: The guarantee is stated in full, and word for word
-        # Both paragraphs ship together, always. The second is the price of the bootstrap feature, and a
-        # guarantee with an undisclosed exception is worse than no guarantee — so the first must never
-        # appear on its own just because it reads better.
-        #
         # The match is the whole sentence rather than a distinctive fragment of it, because a fragment
         # cannot see a qualifier added after it. `grep -q "still cannot run arbitrary code on any"` —
         # what this step used to run — matches "on any enrolled **Linux** host" just as happily, so the
         # one check standing between the project and a quietly narrowed guarantee could not see the
-        # narrowing. Both paragraphs are wrapped across lines and carry blockquote markers, so the file
+        # narrowing. The paragraph is wrapped across lines and carries blockquote markers, so the file
         # is flattened before comparison: what is pinned is the sentence, not where it wraps.
         run: |
           set -eu
           cat > "$RUNNER_TEMP/guarantee.txt" <<'PARAGRAPH'
           An attacker who fully owns the HostSeal control plane, its database, and an administrator account still cannot run arbitrary code on any **enrolled** host, cannot exceed any host's local policy, and cannot reboot or stop services on hosts whose policy forbids it.
           PARAGRAPH
-          cat > "$RUNNER_TEMP/exception.txt" <<'PARAGRAPH'
-          A host **being enrolled** applies, at most once, the bootstrap template its operator named on the command line — shown in full before it runs, signed by a key from that host's own `trusted-signers`, and recorded permanently on the host.
-          PARAGRAPH
           for file in README.md docs/SECURITY.md; do
             flat=$(sed -e 's/^[[:space:]]*>[[:space:]]\{0,1\}//' "$file" | tr '\n' ' ' | tr -s '[:space:]' ' ')
             printf '%s' "$flat" | grep -qF -f "$RUNNER_TEMP/guarantee.txt" \
               || { echo "$file does not state the guarantee, word for word" >&2; exit 1; }
-            printf '%s' "$flat" | grep -qF -f "$RUNNER_TEMP/exception.txt" \
-              || { echo "$file states the guarantee without its exception, word for word" >&2; exit 1; }
           done
-          echo "both paragraphs are present, word for word, in README.md and docs/SECURITY.md"
+          echo "the guarantee is present, word for word, in README.md and docs/SECURITY.md"

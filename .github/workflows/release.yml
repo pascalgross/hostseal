@@ -296,8 +296,8 @@ jobs:
             ### The operator's CLI
 
             `hostseal` is the tool an operator runs on their **own** machine: it signs destructive jobs
-            and bootstrap templates with a key the control plane does not hold, and `hostseal signer`
-            answers the web interface over loopback so a YubiKey can be used from the browser.
+            with a key the control plane does not hold, and `hostseal signer` answers the web interface
+            over loopback so a YubiKey can be used from the browser.
 
             `hostseal-linux-amd64`, `hostseal-linux-arm64` and `hostseal-windows-amd64.zip` are
             attached. It is not a service and installs nothing; `hostseal signer --install` registers it

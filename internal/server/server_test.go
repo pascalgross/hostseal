@@ -21,7 +21,6 @@ import (
 	"github.com/pascalgross/hostseal/internal/collect"
 	"github.com/pascalgross/hostseal/internal/onlinekey"
 	"github.com/pascalgross/hostseal/internal/protocol"
-	"github.com/pascalgross/hostseal/internal/seal"
 	"github.com/pascalgross/hostseal/internal/server"
 	"github.com/pascalgross/hostseal/internal/store"
 )
@@ -76,10 +75,6 @@ type harness struct {
 
 	// platformToken administers tenants and reaches no tenant's data.
 	platformToken string
-
-	// templateKey is the sealing key the server was built with, for fixtures that store templates
-	// directly and still need the enrolment path to be able to open them.
-	templateKey *seal.Key
 
 	// accountEmail and accountPassword are an operator account in the harness's own tenant.
 	//
@@ -167,11 +162,6 @@ func newHarness(t *testing.T, decorate ...func(store.Store) store.Store) *harnes
 	if err != nil {
 		t.Fatalf("preparing the online key: %v", err)
 	}
-	templateKey, err := seal.Ensure(filepath.Join(dir, "ca"))
-	if err != nil {
-		t.Fatalf("preparing the template key: %v", err)
-	}
-
 	var backing store.Store = memory
 	for _, wrap := range decorate {
 		backing = wrap(backing)
@@ -180,7 +170,6 @@ func newHarness(t *testing.T, decorate ...func(store.Store) store.Store) *harnes
 	srv, err := server.New(server.Config{
 		Authority:        authority,
 		OnlineKey:        online,
-		TemplateKey:      templateKey,
 		Store:            backing,
 		Auth:             auth.Chain(provider, accounts, apiTokens),
 		Accounts:         accounts,
@@ -209,8 +198,8 @@ func newHarness(t *testing.T, decorate ...func(store.Store) store.Store) *harnes
 		server: ts, store: memory, dir: dir, caFile: caFile, authority: authority,
 		adminToken: adminToken, secondToken: secondToken,
 		tenant: tenant, otherToken: otherToken, otherTenant: otherTenant,
-		platformToken: platformToken, templateKey: templateKey,
-		accountEmail: accountEmail, accountPassword: accountPassword,
+		platformToken: platformToken,
+		accountEmail:  accountEmail, accountPassword: accountPassword,
 	}
 }
 

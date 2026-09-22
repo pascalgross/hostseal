@@ -38,7 +38,6 @@ import (
 	"github.com/pascalgross/hostseal/internal/notify"
 	"github.com/pascalgross/hostseal/internal/onlinekey"
 	"github.com/pascalgross/hostseal/internal/protocol"
-	"github.com/pascalgross/hostseal/internal/seal"
 	"github.com/pascalgross/hostseal/internal/store"
 )
 
@@ -85,14 +84,6 @@ type Config struct {
 	// substitute for the destructive tier's authority and cannot be used as one — the agent verifies
 	// the two against different anchors and will not accept this key for a destructive intent.
 	OnlineKey *onlinekey.Key
-
-	// TemplateKey seals provisioning template bodies at rest, and is required.
-	//
-	// Required rather than optional, unlike OnlineKey, because its absence would not disable a feature
-	// — it would ship the same feature storing plaintext, and docs/SECURITY.md §7 promises encrypted
-	// bodies unconditionally. `hostseal-server serve` generates one beside the CA on first start, so
-	// requiring it costs an operator nothing.
-	TemplateKey *seal.Key
 
 	// HeartbeatSeconds is the pacing handed to agents.
 	//
@@ -263,10 +254,6 @@ func New(cfg Config) (*Server, error) {
 	if cfg.Auth == nil {
 		return nil, errors.New("server: an authentication provider is required")
 	}
-	if cfg.TemplateKey == nil {
-		return nil, errors.New("server: a template sealing key is required; " +
-			"seal.Ensure generates one beside the CA")
-	}
 	if cfg.HeartbeatSeconds == 0 {
 		cfg.HeartbeatSeconds = protocol.DefaultHeartbeatSeconds
 	}
@@ -358,16 +345,6 @@ func (s *Server) routes() {
 	s.route(http.MethodGet, "/api/v1/account/tokens", s.requireAccount(s.handleListAPITokens))
 	s.route(http.MethodPost, "/api/v1/account/tokens", s.requireAccount(s.handleCreateAPIToken))
 	s.route(http.MethodDelete, "/api/v1/account/tokens/{id}", s.requireAccount(s.handleDeleteAPIToken))
-	s.route(http.MethodGet, "/api/v1/templates", s.requireOperator(s.handleListTemplates))
-	s.route(http.MethodPost, "/api/v1/templates", s.requireOperator(s.handleCreateTemplate))
-	s.route(http.MethodGet, "/api/v1/templates/{name}", s.requireOperator(s.handleGetTemplate))
-	s.route(http.MethodGet, "/api/v1/templates/{name}/versions",
-		s.requireOperator(s.handleListTemplateVersions))
-	s.route(http.MethodPost, "/api/v1/templates/{name}/render", s.requireOperator(s.handleRenderTemplate))
-	// Retiring a template is archive and restore, and there is deliberately no DELETE beside them: a
-	// version is what a host's bootstrap record names, so the control plane has no way to destroy one.
-	s.route(http.MethodPost, "/api/v1/templates/{name}/archive", s.requireOperator(s.handleArchiveTemplate))
-	s.route(http.MethodPost, "/api/v1/templates/{name}/restore", s.requireOperator(s.handleRestoreTemplate))
 	s.route(http.MethodGet, "/api/v1/events", s.requireOperator(s.handleListEvents))
 	s.route(http.MethodGet, "/api/v1/events/stream", s.requireOperator(s.handleEventStream))
 	s.route(http.MethodGet, "/api/v1/services/failed", s.requireOperator(s.handleFailedServices))
@@ -1008,4 +985,13 @@ func writeDecodeError(w http.ResponseWriter, err error, trailing string) {
 func isTooLarge(err error) bool {
 	var maxBytes *http.MaxBytesError
 	return errors.As(err, &maxBytes)
+}
+
+// noStore marks a response as holding a credential no cache may keep.
+//
+// no-store rather than no-cache: no-cache permits storing and requires revalidation, and a session
+// token or a published wallboard secret in a shared proxy's cache is precisely the disclosure being
+// prevented.
+func noStore(w http.ResponseWriter) {
+	w.Header().Set("Cache-Control", "no-store")
 }

@@ -12,8 +12,8 @@ import (
 // wallboardShareColumns is the projection every share read shares, in the order scanWallboardShare
 // expects.
 //
-// One constant rather than a copy per reader, for the reason templateColumns is one: a column added to
-// the listing and forgotten in the lookup produces a share that is complete on the operator's page and
+// One constant rather than a copy per reader: a column added to the listing and forgotten in the
+// lookup produces a share that is complete on the operator's page and
 // missing its passphrase on the path that checks one, which is a difference nobody sees until the
 // moment it decides whether a screen is asked for a passphrase at all.
 const wallboardShareColumns = `id, secret_hash, password_hash, label, created_at,

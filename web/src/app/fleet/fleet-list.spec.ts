@@ -67,7 +67,6 @@ function render(answers: (() => Observable<FleetResponse>)[]): ComponentFixture<
           // The last answer repeats, so a spec about one sequence need not spell out every later read.
           fleet: () => (answers.length > 1 ? answers.shift()! : answers[0])(),
           enrolment: () => of(null),
-          templates: () => of({ templates: [] }),
           enrolmentTokens: () => of({ tokens: [] }),
         } as unknown as ApiService,
       },

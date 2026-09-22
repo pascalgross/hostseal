@@ -14,20 +14,15 @@ of bug this project can have. See [§11](#11-reporting-a-vulnerability).
 > An attacker who fully owns the HostSeal control plane, its database, and an administrator account
 > still cannot run arbitrary code on any **enrolled** host, cannot exceed any host's local policy, and
 > cannot reboot or stop services on hosts whose policy forbids it.
->
-> A host **being enrolled** applies, at most once, the bootstrap template its operator named on the
-> command line — shown in full before it runs, signed by a key from that host's own
-> `trusted-signers`, and recorded permanently on the host.
 
-Both paragraphs ship together, always. The second is the price of the Tier 2 bootstrap feature
-([§7](#7-provisioning-and-the-enrolment-time-exception)); a guarantee with an undisclosed exception is
-worse than no guarantee, so the first paragraph is never quoted on its own — not in the README, not
-in a release announcement, not on a slide — because it reads better that way.
+There is no second paragraph and no footnote. The sentence has no exception, and the `guarantee`
+workflow checks that it is stated word for word here and in the README: a qualifier added after it, or
+an exception carried beside it, is exactly what a reader of a security claim would miss.
 
 HostSeal competes with Landscape, Salt, Uyuni and Rudder on exactly one axis: all of them ship a remote
 execution channel, and HostSeal does not. That absence is the product.
 
-Neither paragraph names an operating system, and neither will. HostSeal manages Ubuntu and Debian today
+The sentence names no operating system, and never will. HostSeal manages Ubuntu and Debian today
 and ships no agent for anything else; where another platform cannot carry a mechanism at the strength
 Linux carries it, HostSeal does less there rather than qualifying the sentence above.
 [§12](#12-windows-hosts) is where that is worked out for Windows, and it is a set of decisions rather
@@ -116,7 +111,8 @@ This placement is deliberate and is worth being explicit about. If the signing k
 `.deb`, the trust chain would be `APT signing key → package → job signing key`, which quietly promotes
 whoever controls APT signing to ultimate authority over every host. In a hosted deployment that would
 hand the provider a route around the customer's own control plane. So the anchor is established
-locally, by the administrator, at enrolment time (see [§7](#7-provisioning-and-the-enrolment-time-exception)).
+locally, by the administrator: `hostseal enroll --signers` installs a file the administrator chose,
+before anything is fetched, and the control plane cannot write to it afterwards.
 
 The signed payload is the canonical JSON encoding of:
 
@@ -137,16 +133,15 @@ YubiKey from there. It changes where the operator stands and nothing else:
 - The key stays in the token. The browser and the control plane see a detached signature, a key id and
   an algorithm name, and never anything else.
 - **The signed payload is built by the signer, never received.** A request over that socket carries a
-  host, an intent and its parameters — or a template's name and body — and the signer assembles the
-  document, chooses the job id, the nonce and both edges of the validity window itself, and
-  canonicalises it. A service that signed a digest handed to it by a web page would restore exactly
-  the attack the wire format exists to prevent: a compromised control plane showing one operation in
+  host, an intent and its parameters, and the signer assembles the document, chooses the job id, the
+  nonce and both edges of the validity window itself, and canonicalises it. A service that signed a
+  digest handed to it by a web page would restore exactly the attack the wire format exists to prevent: a compromised control plane showing one operation in
   the browser and having another signed. `internal/signjob` is the one place those values are decided,
   for both signing paths.
 - **The confirmation is on the machine holding the key**, and shows the operation decoded against that
-  binary's own catalogue — or the template body in full. The browser's rendering is not what is
-  authorised. An operator shown something there they did not ask for in the browser has caught a
-  compromised control plane, and says no.
+  binary's own catalogue. The browser's rendering is not what is authorised. An operator shown
+  something there they did not ask for in the browser has caught a compromised control plane, and
+  says no.
 - The service listens on loopback only, answers only browser origins the operator named on its command
   line, and refuses a request whose `Host` header is not a loopback literal, which is what a page that
   rebound its own hostname to 127.0.0.1 would send. None of these is the control that matters — the
@@ -630,7 +625,7 @@ was — and the failure it prevents is one customer seeing another's fleet.
 ### 5.1 What a tenant is
 
 A tenant owns its hosts and the certificates that authenticate them, its enrolment tokens, its jobs
-and their results, its provisioning templates, its events and the unit-transition history behind them,
+and their results, its events and the unit-transition history behind them,
 its alerting rules and the firing state those rules keep, the accounts of its operators together with
 every session and API token those accounts hold, and the wallboard shares it has published
 ([§4.6](#46-the-wallboard-and-its-link)). It chooses its own approval mode
@@ -782,7 +777,7 @@ it by accident.
 ### 5.4 What deleting a tenant does not do
 
 It removes everything on [§5.1](#51-what-a-tenant-is)'s list: the hosts and their certificates, the
-enrolment tokens, the jobs and their results, the templates, the events and unit transitions, the
+enrolment tokens, the jobs and their results, the events and unit transitions, the
 alerting rules and their state, the accounts of that fleet's operators with every session and token
 those accounts hold, and the published wallboard shares. The cascade is declared in the schema rather
 than assembled in a handler, so the question a new table has to answer is one the migration asks rather
@@ -945,124 +940,33 @@ one.
 
 ---
 
-## 7. Provisioning and the enrolment-time exception
+## 7. Provisioning
 
-This is the exception named in the second paragraph of the guarantee. It is stated plainly here because
-it is the only way a HostSeal component ever applies operator-authored configuration to a host.
+HostSeal does not provision hosts. There is no template store, no cloud-init integration, and no step
+at enrolment that applies anything: what a machine looks like on its first boot is decided by whatever
+built it — Terraform, Proxmox, MAAS, a cloud provider's own user-data field, a hand-written
+`autoinstall` — and HostSeal first meets the machine when `hostseal enroll` runs on it.
 
-**Tier 1 — implemented.** HostSeal stores, versions and renders cloud-init templates, and **never
-delivers them to a host**. The rendered `user-data` goes to a human, or to Terraform / Proxmox / MAAS /
-a cloud provider's user-data field; the machine consumes it at first boot from the hypervisor that
-created it. HostSeal is not in the delivery path at all. This also covers bare metal, since Ubuntu
-`autoinstall` for PXE and ISO is delivered as cloud-init user-data.
+Both halves of that used to exist. The control plane stored, versioned and rendered cloud-init
+templates, and `hostseal enroll --bootstrap NAME` applied one of them once, at enrolment, behind a
+second signing path, a second trust argument and an exception written into §1 that had to be quoted
+beside the guarantee every time it was stated. The exception was sound — the template was signed by a
+key the control plane did not hold, verified against the host's own `trusted-signers`, printed in full
+and recorded before it ran — and it was still an exception, in the one sentence this project exists to
+keep unqualified. It was also the part of the product operators found hardest to reason about, which
+for a security boundary is a cost in itself. It was taken out, whole: the tables, the endpoints, the
+pages, the command, the flag, and the paragraph.
 
-A template is a document with `{{placeholder}}` substitution sites and nothing else: no conditional, no
-loop, no expression — a renderer that grew a `{{ exec }}` would defeat the guarantee without touching
-the intent catalogue, so `internal/provision` refuses to be a template language by construction. Every
-saved revision is a new immutable version, because the Tier 2 record below names one and a record that
-resolves to editable bytes is not a record.
+What remains is the line it was always drawn against. **Tier 3 — pushing configuration to an
+already-enrolled host — is never built.** That is the line between "fleet management without a remote
+shell" and "a remote shell with extra steps", and there is no lesser tier of it either: a control plane
+that could hand a host a document to apply, however signed and however constrained, would be a control
+plane with something to say about what runs there.
 
-A template is therefore never deleted, and the control plane has no endpoint that could delete one.
-What an operator retiring a template gets instead is an **archival**, which withdraws the *name*: an
-archived template leaves the listing, refuses new versions, cannot be named by a new enrolment token,
-cannot be rendered, and is refused at enrolment — while every stored version stays readable, so the
-record on a host still resolves to the bytes that ran on it. The enrolment check runs twice: once
-before the certificate is issued, so that a refusal leaves the token usable, and once more after the
-token has been redeemed, because redemption is the moment an enrolment becomes the one that happened
-and a template withdrawn in between must not still be handed over. The archival is a row about the name in a
-table of its own, never a column on a version, because a version is written once and never updated and
-an UPDATE path added to carry a flag would be an UPDATE path whatever it was first used for. Restoring
-deletes that row and changes nothing else: a restored template is issuable at enrolment only on the
-conditions that already governed it, signature included, so undoing an archival can never be the step
-that lets something reach a host.
-
-HostSeal ships no template: what a machine should look like on its first boot is a decision about a
-fleet. One worked body — unattended upgrades left on, a `wheel` group, `su` restricted to it — is in
-[`examples/cloud-init/`](../examples/cloud-init/README.md), as an example to read rather than a default
-to inherit.
-
-**Tier 2 — the exception, implemented.** `hostseal enroll --bootstrap NAME` applies a named template
-once, on a host that is being enrolled by hand. The template arrives in the enrolment response carrying
-a signature the control plane stored but cannot mint — it is produced offline by
-`hostseal sign-template`, or by `hostseal signer` when the operator signs from the web interface
-([§2.3](#23-offline-job-signing)), with a key the control plane does not hold, and the enrolment token
-must have been minted naming that template, so holding a leaked token is not the authority to choose
-what runs. Which of the two produced a signature is not a property a host can see or would act on: the
-payload is the same canonical `{name, body}` document either way, assembled on the operator's machine
-from a body printed in full on the operator's terminal.
-An agent that asked for a template and receives none, or an unsigned one, or one the fleet has since
-archived, fails the enrolment loudly rather than continuing as though something had been applied. Every
-one of these guardrails is required:
-
-1. Explicit `--bootstrap NAME` on that specific invocation. Never implicit, never a server default,
-   never a group setting.
-2. The full text is printed to the terminal and recorded in
-   `/var/lib/hostseal/bootstrap-applied.json` **before** execution. The record is fsynced — file and
-   directory — before anything runs, because it is the only thing that survives a template that
-   crashes the machine halfway, and "what was attempted" is the question an incident asks.
-
-   The **journal gets the template's name, version, signer, length and SHA-256, and not its body.** A
-   template legitimately carries credentials — a break-glass account's hashed password, a static deploy
-   key, the shapes `provision.Warnings` flags — and journald keeps a structured, indexed, root-readable
-   copy for as long as the journal is retained, on every host enrolled from that template. The fsynced
-   record is the verbatim copy this guardrail is about; the digest is what lets an operator prove the
-   two are the same document without the journal holding the second.
-3. It is signed by a key already present in that host's `trusted-signers`.
-4. It runs exactly once, enforced by an on-disk interlock — which is the record itself, one file, so
-   the two cannot disagree. A crash between "decided to apply" and "applied" refuses a second attempt
-   rather than permitting one; re-enrolling a bootstrapped host does not re-apply. The record is
-   created with `link(2)`, which fails when the file exists, so two concurrent enrolments sharing a
-   state directory produce one application and one refusal rather than two applications — a rename
-   would have let the second silently replace the first's record.
-5. **cloud-init does the applying.** HostSeal writes the verified body into cloud-init's NoCloud seed
-   directory under a fresh instance-id and runs cloud-init's own stages with argument vectors fixed in
-   the agent; no byte of a template ever reaches a command line. HostSeal never ships a hand-written
-   YAML-to-shell engine — that would be the exec channel wearing a hat.
-
-The seed is the one thing beside the template that the control plane has any say in, because its
-meta-data carries the host id the enrolment response assigned. That is a YAML document cloud-init parses
-and acts on, so the id is validated to letters and digits before it is written: an id carrying a newline
-would be adding *keys* to that document rather than filling one in, and `public-keys` is a NoCloud key
-that cloud-init installs into `authorized_keys`. That would be a path from a compromised control plane
-to an SSH key on a host, running beside a template the operator did approve while having none of the
-guardrails above — not covered by the signature, not shown, not recorded. The seed is also removed once
-cloud-init has read it, because a NoCloud seed left in place outranks the machine's real datasource on
-every later boot.
-
-Two honest limits on guardrail 2. The record is written by `hostseal enroll`, which runs as root, but it
-lives in a directory the unprivileged `hostseal` user owns — so it defends the audit trail against the
-adversary [§1](#1-the-guarantee) is about, the control plane, and not against local code running as the
-agent, which [§2.2](#22-local-policy-sovereignty) already assumes may be compromised and which is above
-this file in the trust hierarchy. And the terminal copy is standard output, which systemd also routes to
-the journal when enrolment is run from a unit — so a host enrolled by a unit rather than by a person
-still has the body in its journal, unstructured. An operator running `hostseal enroll` by hand, which is
-what guardrail 2 is written for, sees it on their terminal and nowhere else.
-
-The chicken-and-egg problem is that `trusted-signers` is empty on a fresh install. It is solved by
-establishing the anchor from a local, administrator-chosen file **before** anything is fetched:
-
-```bash
-sudo hostseal enroll --token XYZ \
-     --signers ./trusted-signers \   # local, admin-chosen, written first
-     --policy  ./policy.toml \
-     --bootstrap standard-server     # fetched, verified against the above, displayed, confirmed
-```
-
-Without signers present, `--bootstrap` **refuses**. It never falls back to trusting the server.
-
-**Tier 3 — pushing configuration to an already-enrolled host — is never built.** That is the line
-between "fleet management without a remote shell" and "a remote shell with extra steps".
-
-### Templates are not a secret store
-
-cloud-init `user-data` is plaintext in the cloud metadata service and in
-`/var/lib/cloud/instance/user-data.txt`, readable by anything with instance or metadata access. HostSeal
-therefore:
-
-- **warns** (and does not block) on private-key blocks, `password:` fields and API-token shapes in
-  template bodies;
-- treats rendered output as a credential in its own right, because it carries a live enrolment token;
-- encrypts template bodies at rest.
+`hostseal enroll` still takes `--signers` and `--policy`, and they are the whole of what enrolment
+installs on a host: the trust anchor and the local policy, both from files the administrator chose,
+both written before anything is fetched, and neither writable by the control plane afterwards
+([§2.2](#22-local-policy-sovereignty), [§2.3](#23-offline-job-signing)).
 
 ---
 
@@ -1255,8 +1159,7 @@ An honest guarantee needs an honest boundary. HostSeal does not protect you from
   it is running on, so nothing exceeds what that host's own operator permitted, and §1 still holds. What
   is lost is targeting — a signed job can reach a host it was not meant for. Binding the signature to
   the certificate would not help, because the adversary in §1 owns the CA. An operator who cares should
-  enrol hosts from a control plane they have reason to trust at that moment, which is the same
-  requirement the bootstrap exception in §7 already makes.
+  enrol hosts from a control plane they have reason to trust at that moment.
 - **Anyone with the control plane's database or shell.** Tenants are isolated from each other
   ([§5](#5-tenants)), and they are not isolated from whoever runs the installation. A platform
   administrator cannot read a customer's fleet *through the product* — no route they hold reaches one —
@@ -1307,7 +1210,6 @@ An honest guarantee needs an honest boundary. HostSeal does not protect you from
   wanting a fourth helper, that is a request for a new typed intent upstream.
 - Back up the control plane's CA key separately from its database. An attacker with both can
   impersonate hosts; an attacker with the database alone cannot.
-- Review `/var/lib/hostseal/bootstrap-applied.json` on hosts you did not personally enrol.
 - **Connect the control plane to PostgreSQL as an ordinary role that owns its schema — never as a
   superuser, and never as one with `BYPASSRLS`.** Both are exempt from every row-level security policy,
   which is the whole of the tenant boundary ([§5](#5-tenants)), and the exemption has no symptom: the
@@ -1358,14 +1260,14 @@ the host, against that constant.
 
 ### 12.1 The guarantee does not change
 
-Both paragraphs of [§1](#1-the-guarantee) say **any enrolled host**. No operating system appears in
-either, and none will. A Windows host is inside the guarantee or it is not managed.
+[§1](#1-the-guarantee) says **any enrolled host**. No operating system appears in it, and none will.
+A Windows host is inside the guarantee or it is not managed.
 
 That is a constraint on what may be built rather than a claim that it is easy. Where Windows cannot
 carry a mechanism at the strength Linux carries it, the answer is that HostSeal does less on Windows —
-never that the sentence acquires a qualifier. The CI check that pins both paragraphs matches them word
-for word for exactly this reason: `grep`ping a fragment of the first one also matches "on any enrolled
-**Linux** host", which is how a guarantee narrows without anybody deciding to narrow it.
+never that the sentence acquires a qualifier. The CI check that pins the paragraph matches it word for
+word for exactly this reason: `grep`ping a fragment of it also matches "on any enrolled **Linux**
+host", which is how a guarantee narrows without anybody deciding to narrow it.
 
 ### 12.2 Two of the three mechanisms port unchanged
 

@@ -40,27 +40,6 @@ export interface LocalSignerStatus {
 }
 
 /**
- * A detached signature over one template, as the signer hands it back.
- *
- * The three fields are exactly what `POST /api/v1/templates` takes beside the name and the body, so
- * this page forwards what it was given rather than rearranging it — there is nothing here to get
- * subtly wrong, which is the point.
- */
-export interface LocalSignature {
-  /** The template that was signed, echoed so a caller can check it is about what it asked. */
-  name: string;
-
-  /** The detached signature, base64. */
-  signature: string;
-
-  /** The key that made it. */
-  signerKeyId: string;
-
-  /** The algorithm it was made with. */
-  signerAlgorithm: string;
-}
-
-/**
  * What a browser asks to have signed as a job.
  *
  * Three fields that describe an operation and one that bounds it, and deliberately nothing else. The
@@ -90,16 +69,16 @@ export interface SignJobRequest {
  * plane does not run, cannot reach and must never be able to impersonate.
  *
  * What crosses this boundary is worth being explicit about, because the value of the whole arrangement
- * is in what does not. Out goes a template's name and body — the two fields the signature covers, in
- * plaintext, from this page. Back comes a detached signature, a key id and an algorithm. The private
- * key stays on the token: this page never sees it, the control plane never sees it, and a browser is
- * the last place it should ever be.
+ * is in what does not. Out goes which host, which operation and which parameters — what the job is
+ * about, in plaintext, from this page. Back comes a signed job: a detached signature, a key id and an
+ * algorithm, over a document the signer assembled. The private key stays on the token: this page never
+ * sees it, the control plane never sees it, and a browser is the last place it should ever be.
  *
- * The signer builds the signed payload itself out of the name and the body, and there is no way to ask
- * it to sign anything else. That is the property that lets a page in a browser be part of this at all:
- * even a control plane that served a malicious version of this application could only ask for a
- * signature over a template whose full text is printed in a terminal on the operator's machine, where
- * a human answers yes or no before the token is touched.
+ * The signer builds the signed payload itself out of those fields, and there is no way to ask it to
+ * sign anything else. That is the property that lets a page in a browser be part of this at all: even
+ * a control plane that served a malicious version of this application could only ask for a signature
+ * over a job whose meaning is printed in a terminal on the operator's machine, where a human answers
+ * yes or no before the token is touched.
  */
 @Injectable({ providedIn: 'root' })
 export class LocalSignerService {
@@ -115,17 +94,6 @@ export class LocalSignerService {
    */
   status(): Observable<LocalSignerStatus> {
     return this.http.get<LocalSignerStatus>(`${LOCAL_SIGNER_URL}/v1/signer`);
-  }
-
-  /**
-   * Asks for a signature over one template.
-   *
-   * The request blocks for as long as the operator takes to read the body in their signer's terminal,
-   * answer it, and touch their token — which is a long time by the standards of everything else this
-   * application does, and is the feature rather than a cost.
-   */
-  signTemplate(name: string, body: string): Observable<LocalSignature> {
-    return this.http.post<LocalSignature>(`${LOCAL_SIGNER_URL}/v1/sign-template`, { name, body });
   }
 
   /**

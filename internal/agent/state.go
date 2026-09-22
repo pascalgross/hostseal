@@ -124,53 +124,6 @@ func WriteFileAtomic(path string, data []byte, perm os.FileMode) error {
 	return SyncDir(dir)
 }
 
-// WriteFileExclusive writes a file that must not already exist, and fails if it does.
-//
-// The difference from WriteFileAtomic is the whole point and is one syscall: rename overwrites, link
-// does not. Where a file *is* the record that something has already happened, an overwrite is that
-// record being silently replaced by a second claim to be the first — so the bootstrap interlock, which
-// says a template has been applied to this machine, is written with this rather than with a rename.
-//
-// It is a temporary file linked into place rather than O_CREATE|O_EXCL followed by a write, for the
-// reason internal/onlinekey and internal/seal both give at length: O_EXCL makes *creation* exclusive,
-// but creation and content are two syscalls, and between them the file exists and is empty. A
-// concurrent reader in that window sees zero bytes and reports a corrupt record rather than a race.
-// link(2) is atomic, fails with EEXIST, and never exposes a partial file.
-//
-// os.ErrExist is returned unwrapped enough for errors.Is, because "somebody got here first" is a
-// distinct outcome a caller has to be able to recognise rather than a failure.
-func WriteFileExclusive(path string, data []byte, perm os.FileMode) error {
-	dir := filepath.Dir(path)
-	tmp, err := os.CreateTemp(dir, ".hostseal-*")
-	if err != nil {
-		return fmt.Errorf("agent: creating a temporary file in %s: %w", dir, err)
-	}
-	defer func() { _ = os.Remove(tmp.Name()) }()
-
-	if err := tmp.Chmod(perm); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("agent: setting permissions on %s: %w", path, err)
-	}
-	if _, err := tmp.Write(data); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("agent: writing %s: %w", path, err)
-	}
-	if err := tmp.Sync(); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("agent: syncing %s: %w", path, err)
-	}
-	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("agent: closing %s: %w", path, err)
-	}
-	if err := os.Link(tmp.Name(), path); err != nil {
-		if errors.Is(err, os.ErrExist) {
-			return fmt.Errorf("agent: %s already exists: %w", path, os.ErrExist)
-		}
-		return fmt.Errorf("agent: linking into place at %s: %w", path, err)
-	}
-	return SyncDir(dir)
-}
-
 // MachineIDHash returns the salted hash of /etc/machine-id.
 //
 // The raw value is documented by systemd as confidential and is never transmitted. If no salt exists

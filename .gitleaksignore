@@ -19,9 +19,9 @@
 7c2f084e7763670100f72ea16f5ecb1fbffbc1e1:internal/server/server_test.go:generic-api-key:71
 
 # The third is the same story with a different fixture: a PEM header over the base64 of the word
-# "openssh", written out so that the secret-shape detector in internal/provision had something to
-# find. Looked at, and not a key. The current tree no longer contains it either — pemShape() builds
-# it — so this line covers one published commit and cannot be joined by another.
+# "openssh", written out so that the secret-shape detector the provisioning templates once had could
+# find something. Looked at, and not a key. The current tree no longer contains it, nor the package
+# that read it, so this line covers one published commit and cannot be joined by another.
 7e6f9ebb9fbf5e7282a95ac7f6e6be7c59d28b47:internal/provision/provision_test.go:private-key:81
 
 # The next two are one password, in two files, in a commit that documents the first-start output.

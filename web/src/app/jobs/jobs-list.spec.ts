@@ -55,9 +55,9 @@ interface Writable<T> {
 /**
  * The protected members these specs drive.
  *
- * Driven directly rather than through Material's buttons and selects, for the reason the templates
- * page's specs give: what is under test is what the page does with a signature, and a click path
- * through a component library is a test of that library.
+ * Driven directly rather than through Material's buttons and selects: what is under test is what the
+ * page does with a signature, and a click path through a component library is a test of that
+ * library.
  */
 interface PageInternals {
   /** The host the report form is about. */

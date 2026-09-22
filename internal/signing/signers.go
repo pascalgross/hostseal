@@ -126,9 +126,9 @@ func ParseSigners(r io.Reader, source string) (*SignerSet, error) {
 
 // Empty reports whether the set contains no keys.
 //
-// The agent checks this before doing anything destructive and before applying a bootstrap template.
-// Without keys present, `hostseal enroll --bootstrap` refuses rather than falling back to trusting the
-// server, which is the whole reason the anchor is established from a local file first.
+// The agent checks this before doing anything destructive. Without keys present it refuses rather
+// than falling back to trusting the server, which is the whole reason the anchor is established from
+// a local file the administrator chose.
 func (s *SignerSet) Empty() bool { return s == nil || len(s.keys) == 0 }
 
 // Len returns the number of trusted keys.
